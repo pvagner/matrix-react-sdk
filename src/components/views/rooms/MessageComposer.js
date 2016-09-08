@@ -474,19 +474,19 @@ module.exports = React.createClass({
         //var call = CallHandler.getAnyActiveCall();
         if (this.props.callState && this.props.callState !== 'ended') {
             hangupButton =
-                <div className="mx_MessageComposer_hangup" onClick={this.onHangupClick}>
+                <button className="mx_MessageComposer_hangup" onClick={this.onHangupClick}>
                     <img src="img/hangup.svg" alt="Hangup" title="Hangup" width="25" height="26"/>
-                </div>;
+                </button>;
         }
         else {
             callButton =
-                <div className="mx_MessageComposer_voicecall" onClick={this.onVoiceCallClick} title="Voice call">
+                <button className="mx_MessageComposer_voicecall" onClick={this.onVoiceCallClick} title="Voice call">
                     <TintableSvg src="img/voice.svg" width="16" height="26"/>
-                </div>
+                </button>
             videoCallButton =
-                <div className="mx_MessageComposer_videocall" onClick={this.onCallClick} title="Video call">
+                <button className="mx_MessageComposer_videocall" onClick={this.onCallClick} title="Video call">
                     <TintableSvg src="img/call.svg" width="30" height="22"/>
-                </div>
+                </button>
         }
 
         return (
@@ -499,10 +499,10 @@ module.exports = React.createClass({
                     <div className="mx_MessageComposer_input" onClick={ this.onInputClick }>
                         <textarea ref="textarea" rows="1" onKeyDown={this.onKeyDown} onKeyUp={this.onKeyUp} placeholder="Type a message..." />
                     </div>
-                    <div className="mx_MessageComposer_upload" onClick={this.onUploadClick} title="Upload file">
+                    <button className="mx_MessageComposer_upload" onClick={this.onUploadClick} title="Upload file">
                         <TintableSvg src="img/upload.svg" width="19" height="24"/>
                         <input type="file" style={uploadInputStyle} ref="uploadInput" onChange={this.onUploadFileSelected} />
-                    </div>
+                    </button>
                     { hangupButton }
                     { callButton }
                     { videoCallButton }

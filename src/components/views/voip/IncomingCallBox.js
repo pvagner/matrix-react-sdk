@@ -36,25 +36,27 @@ module.exports = React.createClass({
     },
 
     render: function() {
+        var rand = Math.floor((Math.random() * 8));
+        var titleID ="mx_IncomingCallBox_title" + rand;
 
         var room = this.props.incomingCall ? MatrixClientPeg.get().getRoom(this.props.incomingCall.roomId) : null;
         var caller = room ? room.name : "unknown";
         return (
-            <div className="mx_IncomingCallBox" id="incomingCallBox">
+            <div className="mx_IncomingCallBox" id="incomingCallBox" role="alert-dialog" aria-described-by={ titleID }>
                 <img className="mx_IncomingCallBox_chevron" src="img/chevron-left.png" width="9" height="16" />
-                <div className="mx_IncomingCallBox_title">
+                <div className="mx_IncomingCallBox_title" id={ titleID }>
                     Incoming { this.props.incomingCall ? this.props.incomingCall.type : '' } call from { caller }
                 </div>
                 <div className="mx_IncomingCallBox_buttons">
                     <div className="mx_IncomingCallBox_buttons_cell">
-                        <div className="mx_IncomingCallBox_buttons_decline" onClick={this.onRejectClick}>
+                        <button className="mx_IncomingCallBox_buttons_decline" onClick={this.onRejectClick}>
                             Decline
-                        </div>
+                        </button>
                     </div>
                     <div className="mx_IncomingCallBox_buttons_cell">
-                        <div className="mx_IncomingCallBox_buttons_accept" onClick={this.onAnswerClick}>
+                        <button className="mx_IncomingCallBox_buttons_accept" onClick={this.onAnswerClick}>
                             Accept
-                        </div>
+                        </button>
                     </div>
                 </div>
             </div>
