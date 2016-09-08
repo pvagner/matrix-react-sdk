@@ -15,10 +15,13 @@ limitations under the License.
 */
 
 var dis = require("./dispatcher");
+var sdk = require("./index");
 
-// FIXME: these vars should be bundled up and attached to 
+// FIXME: these vars should be bundled up and attached to
 // module.exports otherwise this will break when included by both
 // react-sdk and apps layered on top.
+
+var DEBUG = 0;
 
 // The colour keys to be replaced as referred to in SVGs
 var keyRgb = [
@@ -64,6 +67,7 @@ var cssAttrs = [
     "borderColor",
     "borderTopColor",
     "borderBottomColor",
+    "borderLeftColor",
 ];
 
 var svgAttrs = [
@@ -74,6 +78,7 @@ var svgAttrs = [
 var cached = false;
 
 function calcCssFixups() {
+    if (DEBUG) console.log("calcSvgFixups start");
     for (var i = 0; i < document.styleSheets.length; i++) {
         var ss = document.styleSheets[i];
         if (!ss) continue; // well done safari >:(
@@ -104,13 +109,16 @@ function calcCssFixups() {
             }
         }
     }
+    if (DEBUG) console.log("calcSvgFixups end");
 }
 
 function applyCssFixups() {
+    if (DEBUG) console.log("applyCssFixups start");
     for (var i = 0; i < cssFixups.length; i++) {
         var cssFixup = cssFixups[i];
         cssFixup.style[cssFixup.attr] = colors[cssFixup.index];
     }
+    if (DEBUG) console.log("applyCssFixups end");
 }
 
 function hexToRgb(color) {
@@ -134,6 +142,7 @@ function rgbToHex(rgb) {
 
 module.exports = {
     tint: function(primaryColor, secondaryColor, tertiaryColor) {
+
         if (!cached) {
             calcCssFixups();
             cached = true;
@@ -172,11 +181,19 @@ module.exports = {
 
         colors = [primaryColor, secondaryColor, tertiaryColor];
 
+        if (DEBUG) console.log("Tinter.tint");
+
         // go through manually fixing up the stylesheets.
         applyCssFixups();
 
         // tell all the SVGs to go fix themselves up
-        dis.dispatch({ action: 'tint_update' });        
+        // we don't do this as a dispatch otherwise it will visually lag
+        var TintableSvg = sdk.getComponent("elements.TintableSvg");
+        if (TintableSvg.mounts) {
+            Object.keys(TintableSvg.mounts).forEach((id) => {
+                TintableSvg.mounts[id].tint();
+            });
+        }
     },
 
     // XXX: we could just move this all into TintableSvg, but as it's so similar
@@ -188,6 +205,7 @@ module.exports = {
         // updated would be a PITA, so just brute-force search for the
         // key colour; cache the element and apply.
 
+        if (DEBUG) console.log("calcSvgFixups start for " + svgs);
         var fixups = [];
         for (var i = 0; i < svgs.length; i++) {
             var svgDoc;
@@ -222,14 +240,17 @@ module.exports = {
                 }
             }
         }
+        if (DEBUG) console.log("calcSvgFixups end");
 
         return fixups;
     },
 
     applySvgFixups: function(fixups) {
+        if (DEBUG) console.log("applySvgFixups start for " + fixups);
         for (var i = 0; i < fixups.length; i++) {
             var svgFixup = fixups[i];
             svgFixup.node.setAttribute(svgFixup.attr, colors[svgFixup.index]);
         }
+        if (DEBUG) console.log("applySvgFixups end");
     },
 };

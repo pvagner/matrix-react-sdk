@@ -15,18 +15,15 @@ limitations under the License.
 */
 
 // TODO: This component is enormous! There's several things which could stand-alone:
-//  - Aux component
 //  - Search results component
 //  - Drag and drop
 //  - File uploading - uploadFile()
-//  - Timeline component (alllll the logic in getEventTiles())
 
 var React = require("react");
 var ReactDOM = require("react-dom");
 var q = require("q");
 var classNames = require("classnames");
 var Matrix = require("matrix-js-sdk");
-var EventTimeline = Matrix.EventTimeline;
 
 var MatrixClientPeg = require("../../MatrixClientPeg");
 var ContentMessages = require("../../ContentMessages");
@@ -34,22 +31,17 @@ var Modal = require("../../Modal");
 var sdk = require('../../index');
 var CallHandler = require('../../CallHandler');
 var TabComplete = require("../../TabComplete");
-var MemberEntry = require("../../TabCompleteEntries").MemberEntry;
-var CommandEntry = require("../../TabCompleteEntries").CommandEntry;
 var Resend = require("../../Resend");
-var SlashCommands = require("../../SlashCommands");
 var dis = require("../../dispatcher");
 var Tinter = require("../../Tinter");
 var rate_limited_func = require('../../ratelimitedfunc');
+var ObjectUtils = require('../../ObjectUtils');
 
-var PAGINATE_SIZE = 20;
-var INITIAL_SIZE = 20;
-var SEND_READ_RECEIPT_DELAY = 2000;
-var TIMELINE_CAP = 1000; // the most events to show in a timeline
+import UserProvider from '../../autocomplete/UserProvider';
 
-var DEBUG_SCROLL = false;
+var DEBUG = false;
 
-if (DEBUG_SCROLL) {
+if (DEBUG) {
     // using bind means that we get to keep useful line numbers in the console
     var debuglog = console.log.bind(console);
 } else {
@@ -61,66 +53,92 @@ module.exports = React.createClass({
     propTypes: {
         ConferenceHandler: React.PropTypes.any,
 
-        roomId: React.PropTypes.string.isRequired,
+        // Either a room ID or room alias for the room to display.
+        // If the room is being displayed as a result of the user clicking
+        // on a room alias, the alias should be supplied. Otherwise, a room
+        // ID should be supplied.
+        roomAddress: React.PropTypes.string.isRequired,
+
+        // If a room alias is passed to roomAddress, a function can be
+        // provided here that will be called with the ID of the room
+        // once it has been resolved.
+        onRoomIdResolved: React.PropTypes.func,
+
+        // An object representing a third party invite to join this room
+        // Fields:
+        // * inviteSignUrl (string) The URL used to join this room from an email invite
+        //                          (given as part of the link in the invite email)
+        // * invitedEmail (string) The email address that was invited to this room
+        thirdPartyInvite: React.PropTypes.object,
+
+        // Any data about the room that would normally come from the Home Server
+        // but has been passed out-of-band, eg. the room name and avatar URL
+        // from an email invite (a workaround for the fact that we can't
+        // get this information from the HS using an email invite).
+        // Fields:
+        //  * name (string) The room's name
+        //  * avatarUrl (string) The mxc:// avatar URL for the room
+        //  * inviterName (string) The display name of the person who
+        //  *                      invited us tovthe room
+        oobData: React.PropTypes.object,
 
         // id of an event to jump to. If not given, will go to the end of the
         // live timeline.
         eventId: React.PropTypes.string,
 
         // where to position the event given by eventId, in pixels from the
-        // bottom of the viewport. If not given, will try to put the event in the
-        // middle of the viewprt.
+        // bottom of the viewport. If not given, will try to put the event
+        // 1/3 of the way down the viewport.
         eventPixelOffset: React.PropTypes.number,
 
         // ID of an event to highlight. If undefined, no event will be highlighted.
         // Typically this will either be the same as 'eventId', or undefined.
         highlightedEventId: React.PropTypes.string,
+
+        // is the RightPanel collapsed?
+        rightPanelCollapsed: React.PropTypes.bool,
     },
 
-    /* properties in RoomView objects include:
-     *
-     * eventNodes: a map from event id to DOM node representing that event
-     */
     getInitialState: function() {
-        var room = this.props.roomId ? MatrixClientPeg.get().getRoom(this.props.roomId) : null;
         return {
-            room: room,
-            events: [],
-            canBackPaginate: true,
-            paginating: room != null,
+            room: null,
+            roomId: null,
+            roomLoading: true,
             editingRoomSettings: false,
             uploadingRoomSettings: false,
             numUnreadMessages: 0,
             draggingFile: false,
             searching: false,
             searchResults: null,
-            hasUnsentMessages: this._hasUnsentMessages(room),
+            hasUnsentMessages: false,
             callState: null,
-            timelineLoading: true, // track whether our room timeline is loading
             guestsCanJoin: false,
             canPeek: false,
-            readMarkerEventId: room ? room.getEventReadUpTo(MatrixClientPeg.get().credentials.userId) : null,
-            readMarkerGhostEventId: undefined,
+
+            // error object, as from the matrix client/server API
+            // If we failed to load information about the room,
+            // store the error here.
+            roomLoadError: null,
 
             // this is true if we are fully scrolled-down, and are looking at
             // the end of the live timeline. It has the effect of hiding the
             // 'scroll to bottom' knob, among a couple of other things.
             atEndOfLiveTimeline: true,
+
+            showTopUnreadMessagesBar: false,
+
+            auxPanelMaxHeight: undefined,
         }
     },
 
     componentWillMount: function() {
-        this.last_rr_sent_event_id = undefined;
         this.dispatcherRef = dis.register(this.onAction);
         MatrixClientPeg.get().on("Room", this.onRoom);
         MatrixClientPeg.get().on("Room.timeline", this.onRoomTimeline);
-        MatrixClientPeg.get().on("Room.name", this.onRoomName);
         MatrixClientPeg.get().on("Room.accountData", this.onRoomAccountData);
-        MatrixClientPeg.get().on("Room.receipt", this.onRoomReceipt);
-        MatrixClientPeg.get().on("RoomMember.typing", this.onRoomMemberTyping);
         MatrixClientPeg.get().on("RoomState.members", this.onRoomStateMember);
-        // xchat-style tab complete, add a colon if tab
-        // completing at the start of the text
+        MatrixClientPeg.get().on("accountData", this.onAccountData);
+
         this.tabComplete = new TabComplete({
             allowLooping: false,
             autoEnterTabComplete: true,
@@ -130,14 +148,40 @@ module.exports = React.createClass({
             }
         });
 
+        if (this.props.roomAddress[0] == '#') {
+            // we always look up the alias from the directory server:
+            // we want the room that the given alias is pointing to
+            // right now. We may have joined that alias before but there's
+            // no guarantee the alias hasn't subsequently been remapped.
+            MatrixClientPeg.get().getRoomIdForAlias(this.props.roomAddress).done((result) => {
+                if (this.props.onRoomIdResolved) {
+                    this.props.onRoomIdResolved(result.room_id);
+                }
+                var room = MatrixClientPeg.get().getRoom(result.room_id);
+                this.setState({
+                    room: room,
+                    roomId: result.room_id,
+                    roomLoading: !room,
+                    hasUnsentMessages: this._hasUnsentMessages(room),
+                }, this._onHaveRoom);
+            }, (err) => {
+                this.setState({
+                    roomLoading: false,
+                    roomLoadError: err,
+                });
+            });
+        } else {
+            var room = MatrixClientPeg.get().getRoom(this.props.roomAddress);
+            this.setState({
+                roomId: this.props.roomAddress,
+                room: room,
+                roomLoading: !room,
+                hasUnsentMessages: this._hasUnsentMessages(room),
+            }, this._onHaveRoom);
+        }
+    },
 
-        // to make the timeline load work correctly, build up a chain of promises which
-        // take us through the necessary steps.
-
-        // First of all, we may need to load the room. Construct a promise
-        // which resolves to the Room object.
-        var roomProm;
-
+    _onHaveRoom: function() {
         // if this is an unknown room then we're in one of three states:
         // - This is a room we can peek into (search engine) (we can /peek)
         // - This is a room we can publicly join or were invited to. (we can /join)
@@ -145,96 +189,58 @@ module.exports = React.createClass({
         // We can't try to /join because this may implicitly accept invites (!)
         // We can /peek though. If it fails then we present the join UI. If it
         // succeeds then great, show the preview (but we still may be able to /join!).
-        if (!this.state.room) {
-            console.log("Attempting to peek into room %s", this.props.roomId);
+        // Note that peeking works by room ID and room ID only, as opposed to joining
+        // which must be by alias or invite wherever possible (peeking currently does
+        // not work over federation).
 
-            roomProm = MatrixClientPeg.get().peekInRoom(this.props.roomId).then((room) => {
-                this.setState({
-                    room: room
-                });
-                return room;
-            });
-        } else {
-            roomProm = q(this.state.room);
+        // NB. We peek if we are not in the room, although if we try to peek into
+        // a room in which we have a member event (ie. we've left) synapse will just
+        // send us the same data as we get in the sync (ie. the last events we saw).
+        var user_is_in_room = null;
+        if (this.state.room) {
+            user_is_in_room = this.state.room.hasMembershipState(
+                MatrixClientPeg.get().credentials.userId, 'join'
+            );
+
+            this._updateAutoComplete();
+            this.tabComplete.loadEntries(this.state.room);
         }
 
-        // Next, load the timeline.
-        roomProm.then((room) => {
-            this._calculatePeekRules(room);
-            return this._initTimeline(this.props);
-        }).catch((err) => {
-            // This won't necessarily be a MatrixError, but we duck-type
-            // here and say if it's got an 'errcode' key with the right value,
-            // it means we can't peek.
-            if (err.errcode == "M_GUEST_ACCESS_FORBIDDEN") {
-                // This is fine: the room just isn't peekable (we assume).
-                this.setState({
-                    timelineLoading: false,
-                });
-            } else {
-                throw err;
+        if (!user_is_in_room && this.state.roomId) {
+            if (this.props.autoJoin) {
+                this.onJoinButtonClicked();
+            } else if (this.state.roomId) {
+                console.log("Attempting to peek into room %s", this.state.roomId);
+
+                MatrixClientPeg.get().peekInRoom(this.state.roomId).then((room) => {
+                    this.setState({
+                        room: room,
+                        roomLoading: false,
+                    });
+                    this._onRoomLoaded(room);
+                }, (err) => {
+                    // This won't necessarily be a MatrixError, but we duck-type
+                    // here and say if it's got an 'errcode' key with the right value,
+                    // it means we can't peek.
+                    if (err.errcode == "M_GUEST_ACCESS_FORBIDDEN") {
+                        // This is fine: the room just isn't peekable (we assume).
+                        this.setState({
+                            roomLoading: false,
+                        });
+                    } else {
+                        throw err;
+                    }
+                }).done();
             }
-        }).done();
+        } else if (user_is_in_room) {
+            MatrixClientPeg.get().stopPeeking();
+            this._onRoomLoaded(this.state.room);
+        }
     },
 
-    _initTimeline: function(props) {
-        var initialEvent = props.eventId;
-        var pixelOffset = props.eventPixelOffset;
-        return this._loadTimeline(initialEvent, pixelOffset);
-    },
-
-    /**
-     * (re)-load the event timeline, and initialise the scroll state, centered
-     * around the given event.
-     *
-     * @param {string?}  eventId the event to focus on. If undefined, will
-     *    scroll to the bottom of the room.
-     *
-     * @param {number?} pixelOffset   offset to position the given event at
-     *    (pixels from the bottom of the view). If undefined, will put the
-     *    event in the middle of the view.
-     *
-     * returns a promise which will resolve when the load completes.
-     */
-    _loadTimeline: function(eventId, pixelOffset) {
-        // TODO: we could optimise this, by not resetting the window if the
-        // event is in the current window (though it's not obvious how we can
-        // tell if the current window is on the live event stream)
-
-        this.setState({
-            events: [],
-            searchResults: null, // we may have arrived here by clicking on a
-                                 // search result. Hide the results.
-            timelineLoading: true,
-        });
-
-        this._timelineWindow = new Matrix.TimelineWindow(
-            MatrixClientPeg.get(), this.state.room,
-            {windowLimit: TIMELINE_CAP});
-
-        return this._timelineWindow.load(eventId, INITIAL_SIZE).then(() => {
-            debuglog("RoomView: timeline loaded");
-            this._onTimelineUpdated(true);
-        }).finally(() => {
-            this.setState({
-                timelineLoading: false,
-            }, () => {
-                // initialise the scroll state of the message panel
-                if (!this.refs.messagePanel) {
-                    // this shouldn't happen.
-                    console.log("can't initialise scroll state because " +
-                                "messagePanel didn't load");
-                    return;
-                }
-                if (eventId) {
-                    this.refs.messagePanel.scrollToToken(eventId, pixelOffset);
-                } else {
-                    this.refs.messagePanel.scrollToBottom();
-                }
-
-                this.sendReadReceipt();
-            });
-        });
+    shouldComponentUpdate: function(nextProps, nextState) {
+        return (!ObjectUtils.shallowEqual(this.props, nextProps) ||
+                !ObjectUtils.shallowEqual(this.state, nextState));
     },
 
     componentWillUnmount: function() {
@@ -259,30 +265,29 @@ module.exports = React.createClass({
         if (MatrixClientPeg.get()) {
             MatrixClientPeg.get().removeListener("Room", this.onRoom);
             MatrixClientPeg.get().removeListener("Room.timeline", this.onRoomTimeline);
-            MatrixClientPeg.get().removeListener("Room.name", this.onRoomName);
             MatrixClientPeg.get().removeListener("Room.accountData", this.onRoomAccountData);
-            MatrixClientPeg.get().removeListener("Room.receipt", this.onRoomReceipt);
-            MatrixClientPeg.get().removeListener("RoomMember.typing", this.onRoomMemberTyping);
             MatrixClientPeg.get().removeListener("RoomState.members", this.onRoomStateMember);
+            MatrixClientPeg.get().removeListener("accountData", this.onAccountData);
         }
 
-        window.removeEventListener('resize', this.onResize);        
+        window.removeEventListener('resize', this.onResize);
 
-        Tinter.tint(); // reset colourscheme
+        // cancel any pending calls to the rate_limited_funcs
+        this._updateRoomMembers.cancelPendingCall();
+
+        // no need to do this as Dir & Settings are now overlays. It just burnt CPU.
+        // console.log("Tinter.tint from RoomView.unmount");
+        // Tinter.tint(); // reset colourscheme
     },
 
     onAction: function(payload) {
         switch (payload.action) {
             case 'message_send_failed':
             case 'message_sent':
+            case 'message_send_cancelled':
                 this.setState({
                     hasUnsentMessages: this._hasUnsentMessages(this.state.room)
                 });
-            case 'message_resend_started':
-                this.setState({
-                    room: MatrixClientPeg.get().getRoom(this.props.roomId)
-                });
-                this.forceUpdate();
                 break;
             case 'notifier_enabled':
             case 'upload_failed':
@@ -298,7 +303,7 @@ module.exports = React.createClass({
                     return;
                 }
 
-                var call = CallHandler.getCallForRoom(payload.room_id);
+                var call = this._getCallForRoom();
                 var callState;
 
                 if (call) {
@@ -317,27 +322,17 @@ module.exports = React.createClass({
                 });
 
                 break;
-            case 'user_activity':
-            case 'user_activity_end':
-                // we could treat user_activity_end differently and not
-                // send receipts for messages that have arrived between
-                // the actual user activity and the time they stopped
-                // being active, but let's see if this is actually
-                // necessary.
-                this.sendReadReceipt();
-                break;
         }
     },
 
     componentWillReceiveProps: function(newProps) {
-        if (newProps.roomId != this.props.roomId) {
+        if (newProps.roomAddress != this.props.roomAddress) {
             throw new Error("changing room on a RoomView is not supported");
         }
 
         if (newProps.eventId != this.props.eventId) {
-            console.log("RoomView switching to eventId " + newProps.eventId +
-                        " (was " + this.props.eventId + ")");
-            return this._initTimeline(newProps);
+            // when we change focussed event id, hide the search results.
+            this.setState({searchResults: null});
         }
     },
 
@@ -345,7 +340,11 @@ module.exports = React.createClass({
         if (this.unmounted) return;
 
         // ignore events for other rooms
-        if (room.roomId != this.props.roomId) return;
+        if (!this.state.room || room.roomId != this.state.room.roomId) return;
+
+        if (ev.getType() === "org.matrix.room.preview_urls") {
+            this._updatePreviewUrlVisibility(room);
+        }
 
         // ignore anything but real-time updates at the end of the room:
         // updates from pagination will happen when the paginate completes.
@@ -361,20 +360,26 @@ module.exports = React.createClass({
                 // no change
             }
             else {
-                this.setState((state, props) => { 
+                this.setState((state, props) => {
                     return {numUnreadMessages: state.numUnreadMessages + 1};
                 });
             }
         }
 
-        // tell the messagepanel to go paginate itself. This in turn will cause
-        // onMessageListFillRequest to be called, which will call
-        // _onTimelineUpdated, which will update the state with the new event -
-        // so there is no need update the state here.
-        //
-        if (this.refs.messagePanel) {
-            this.refs.messagePanel.checkFillState();
+        // update the tab complete list as it depends on who most recently spoke,
+        // and that has probably just changed
+        if (ev.sender) {
+            this.tabComplete.onMemberSpoke(ev.sender);
+            // nb. we don't need to update the new autocomplete here since
+            // its results are currently ordered purely by search score.
         }
+    },
+
+    // called when state.room is first initialised (either at initial load,
+    // after a successful peek, or after we join the room).
+    _onRoomLoaded: function(room) {
+        this._calculatePeekRules(room);
+        this._updatePreviewUrlVisibility(room);
     },
 
     _calculatePeekRules: function(room) {
@@ -393,30 +398,60 @@ module.exports = React.createClass({
         }
     },
 
+    _updatePreviewUrlVisibility: function(room) {
+        // console.log("_updatePreviewUrlVisibility");
+
+        // check our per-room overrides
+        var roomPreviewUrls = room.getAccountData("org.matrix.room.preview_urls");
+        if (roomPreviewUrls && roomPreviewUrls.getContent().disable !== undefined) {
+            this.setState({
+                showUrlPreview: !roomPreviewUrls.getContent().disable
+            });
+            return;
+        }
+
+        // check our global disable override
+        var userRoomPreviewUrls = MatrixClientPeg.get().getAccountData("org.matrix.preview_urls");
+        if (userRoomPreviewUrls && userRoomPreviewUrls.getContent().disable) {
+            this.setState({
+                showUrlPreview: false
+            });
+            return;
+        }
+
+        // check the room state event
+        var roomStatePreviewUrls = room.currentState.getStateEvents('org.matrix.room.preview_urls', '');
+        if (roomStatePreviewUrls && roomStatePreviewUrls.getContent().disable) {
+            this.setState({
+                showUrlPreview: false
+            });
+            return;
+        }
+
+        // otherwise, we assume they're on.
+        this.setState({
+            showUrlPreview: true
+        });
+    },
+
     onRoom: function(room) {
         // This event is fired when the room is 'stored' by the JS SDK, which
         // means it's now a fully-fledged room object ready to be used, so
         // set it in our state and start using it (ie. init the timeline)
         // This will happen if we start off viewing a room we're not joined,
         // then join it whilst RoomView is looking at that room.
-        if (room.roomId == this.props.roomId) {
+        if (!this.state.room && room.roomId == this._joiningRoomId) {
+            this._joiningRoomId = undefined;
             this.setState({
-                room: room
+                room: room,
+                joining: false,
             });
-            this._initTimeline(this.props).done();
-        }
-    },
-
-    onRoomName: function(room) {
-        if (room.roomId == this.props.roomId) {
-            this.setState({
-                room: room
-            });
+            this._onRoomLoaded(room);
         }
     },
 
     updateTint: function() {
-        var room = MatrixClientPeg.get().getRoom(this.props.roomId);
+        var room = this.state.room;
         if (!room) return;
 
         var color_scheme_event = room.getAccountData("org.matrix.room.color_scheme");
@@ -424,80 +459,67 @@ module.exports = React.createClass({
         if (color_scheme_event) {
             color_scheme = color_scheme_event.getContent();
             // XXX: we should validate the event
-        }                
+        }
+        console.log("Tinter.tint from updateTint");
         Tinter.tint(color_scheme.primary_color, color_scheme.secondary_color);
     },
 
-    onRoomAccountData: function(room, event) {
-        if (room.roomId == this.props.roomId) {
-            if (event.getType === "org.matrix.room.color_scheme") {
+    onAccountData: function(event) {
+        if (event.getType() === "org.matrix.preview_urls" && this.state.room) {
+            this._updatePreviewUrlVisibility(this.state.room);
+        }
+    },
+
+    onRoomAccountData: function(event, room) {
+        if (room.roomId == this.state.roomId) {
+            if (event.getType() === "org.matrix.room.color_scheme") {
                 var color_scheme = event.getContent();
                 // XXX: we should validate the event
+                console.log("Tinter.tint from onRoomAccountData");
                 Tinter.tint(color_scheme.primary_color, color_scheme.secondary_color);
             }
+            else if (event.getType() === "org.matrix.room.preview_urls") {
+                this._updatePreviewUrlVisibility(room);
+            }
         }
-    },
-
-    onRoomReceipt: function(receiptEvent, room) {
-        if (room.roomId == this.props.roomId) {
-            var readMarkerEventId = this.state.room.getEventReadUpTo(MatrixClientPeg.get().credentials.userId);
-            var readMarkerGhostEventId = this.state.readMarkerGhostEventId;
-            if (this.state.readMarkerEventId !== undefined && this.state.readMarkerEventId != readMarkerEventId) {
-                readMarkerGhostEventId = this.state.readMarkerEventId;
-            }
-
-
-            // if the event after the one referenced in the read receipt if sent by us, do nothing since
-            // this is a temporary period before the synthesized receipt for our own message arrives
-            var readMarkerGhostEventIndex;
-            for (var i = 0; i < this.state.events.length; ++i) {
-                if (this.state.events[i].getId() == readMarkerGhostEventId) {
-                    readMarkerGhostEventIndex = i;
-                    break;
-                }
-            }
-            if (readMarkerGhostEventIndex + 1 < this.state.events.length) {
-                var nextEvent = this.state.events[readMarkerGhostEventIndex + 1];
-                if (nextEvent.sender && nextEvent.sender.userId == MatrixClientPeg.get().credentials.userId) {
-                    readMarkerGhostEventId = undefined;
-                }
-            }
-
-            this.setState({
-                readMarkerEventId: readMarkerEventId,
-                readMarkerGhostEventId: readMarkerGhostEventId,
-            });
-        }
-    },
-
-    onRoomMemberTyping: function(ev, member) {
-        this.forceUpdate();
     },
 
     onRoomStateMember: function(ev, state, member) {
-        if (member.roomId === this.props.roomId) {
-            // a member state changed in this room, refresh the tab complete list
-            this._updateTabCompleteList();
-
-            var room = MatrixClientPeg.get().getRoom(this.props.roomId);
-            if (!room) return;
-            var me = MatrixClientPeg.get().credentials.userId;
-            if (this.state.joining && room.hasMembershipState(me, "join")) {
-                this.setState({
-                    joining: false
-                });
-            }
-        }
-
-        if (!this.props.ConferenceHandler) {
+        // ignore if we don't have a room yet
+        if (!this.state.room) {
             return;
         }
-        if (member.roomId !== this.props.roomId ||
-                member.userId !== this.props.ConferenceHandler.getConferenceUserIdForRoom(member.roomId)) {
+
+        // ignore members in other rooms
+        if (member.roomId !== this.state.room.roomId) {
             return;
         }
-        this._updateConfCallNotification();
+
+        if (this.props.ConferenceHandler &&
+            member.userId === this.props.ConferenceHandler.getConferenceUserIdForRoom(member.roomId)) {
+            this._updateConfCallNotification();
+        }
+
+        this._updateRoomMembers();
     },
+
+    // rate limited because a power level change will emit an event for every
+    // member in the room.
+    _updateRoomMembers: new rate_limited_func(function() {
+        // a member state changed in this room, refresh the tab complete list
+        this.tabComplete.loadEntries(this.state.room);
+        this._updateAutoComplete();
+
+        // if we are now a member of the room, where we were not before, that
+        // means we have finished joining a room we were previously peeking
+        // into.
+        var me = MatrixClientPeg.get().credentials.userId;
+        if (this.state.joining && this.state.room.hasMembershipState(me, "join")) {
+            this.setState({
+                joining: false
+            });
+        }
+    }, 500),
 
     _hasUnsentMessages: function(room) {
         return this._getUnsentMessages(room).length > 0;
@@ -505,20 +527,18 @@ module.exports = React.createClass({
 
     _getUnsentMessages: function(room) {
         if (!room) { return []; }
-        // TODO: It would be nice if the JS SDK provided nicer constant-time
-        // constructs rather than O(N) (N=num msgs) on this.
-        return room.timeline.filter(function(ev) {
+        return room.getPendingEvents().filter(function(ev) {
             return ev.status === Matrix.EventStatus.NOT_SENT;
         });
     },
 
     _updateConfCallNotification: function() {
-        var room = MatrixClientPeg.get().getRoom(this.props.roomId);
+        var room = this.state.room;
         if (!room || !this.props.ConferenceHandler) {
             return;
         }
         var confMember = room.getMember(
-            this.props.ConferenceHandler.getConferenceUserIdForRoom(this.props.roomId)
+            this.props.ConferenceHandler.getConferenceUserIdForRoom(room.roomId)
         );
 
         if (!confMember) {
@@ -537,11 +557,7 @@ module.exports = React.createClass({
     },
 
     componentDidMount: function() {
-        if (this.refs.messagePanel) {
-            this._initialiseMessagePanel();
-        }
-
-        var call = CallHandler.getCallForRoom(this.props.roomId);
+        var call = this._getCallForRoom();
         var callState = call ? call.call_state : "ended";
         this.setState({
             callState: callState
@@ -552,19 +568,14 @@ module.exports = React.createClass({
         window.addEventListener('resize', this.onResize);
         this.onResize();
 
-        if (this.refs.roomView) {
-            var roomView = ReactDOM.findDOMNode(this.refs.roomView);
-            roomView.addEventListener('drop', this.onDrop);
-            roomView.addEventListener('dragover', this.onDragOver);
-            roomView.addEventListener('dragleave', this.onDragLeaveOrEnd);
-            roomView.addEventListener('dragend', this.onDragLeaveOrEnd);
-        }
-
-        this._updateTabCompleteList();
-
         // XXX: EVIL HACK to autofocus inviting on empty rooms.
         // We use the setTimeout to avoid racing with focus_composer.
-        if (this.state.room && this.state.room.getJoinedMembers().length == 1) {
+        if (this.state.room &&
+            this.state.room.getJoinedMembers().length == 1 &&
+            this.state.room.getLiveTimeline() &&
+            this.state.room.getLiveTimeline().getEvents() &&
+            this.state.room.getLiveTimeline().getEvents().length <= 6)
+        {
             var inviteBox = document.getElementById("mx_SearchableEntityList_query");
             setTimeout(function() {
                 if (inviteBox) {
@@ -574,49 +585,20 @@ module.exports = React.createClass({
         }
     },
 
-    _updateTabCompleteList: new rate_limited_func(function() {
-        if (!this.state.room || !this.tabComplete) {
-            return;
-        }
-        this.tabComplete.setCompletionList(
-            MemberEntry.fromMemberList(this.state.room.getJoinedMembers()).concat(
-                CommandEntry.fromCommands(SlashCommands.getCommandList())
-            )
-        );
-    }, 500),
-
-    _initialiseMessagePanel: function() {
-        var messagePanel = ReactDOM.findDOMNode(this.refs.messagePanel);
-        this.refs.messagePanel.initialised = true;
-        this.updateTint();
-    },
-
     componentDidUpdate: function() {
-        // we need to initialise the messagepanel if we've just joined the
-        // room. TODO: we really really ought to factor out messagepanel to a
-        // separate component to avoid this ridiculous dance.
-        if (!this.refs.messagePanel) return;
-
-        if (!this.refs.messagePanel.initialised) {
-            this._initialiseMessagePanel();
+        if (this.refs.roomView) {
+            var roomView = ReactDOM.findDOMNode(this.refs.roomView);
+            if (!roomView.ondrop) {
+                roomView.addEventListener('drop', this.onDrop);
+                roomView.addEventListener('dragover', this.onDragOver);
+                roomView.addEventListener('dragleave', this.onDragLeaveOrEnd);
+                roomView.addEventListener('dragend', this.onDragLeaveOrEnd);
+            }
         }
     },
 
-    _onTimelineUpdated: function(gotResults) {
-        // we might have switched rooms since the load started - just bin
-        // the results if so.
-        if (this.unmounted) return;
-
-        this.setState({
-            paginating: false,
-        });
-
-        if (gotResults) {
-            this.setState({
-                events: this._timelineWindow.getEvents(),
-                canBackPaginate: this._timelineWindow.canPaginate(EventTimeline.BACKWARDS),
-            });
-        }
+    onSearchResultsResize: function() {
+        dis.dispatch({ action: 'timeline_resize' }, true);
     },
 
     onSearchResultsFillRequest: function(backwards) {
@@ -634,27 +616,17 @@ module.exports = React.createClass({
         }
     },
 
-    // set off a pagination request.
-    onMessageListFillRequest: function(backwards) {
-        var dir = backwards ? EventTimeline.BACKWARDS : EventTimeline.FORWARDS;
-        if(!this._timelineWindow.canPaginate(dir)) {
-            debuglog("RoomView: can't paginate at this time; backwards:"+backwards);
-            return q(false);
-        }
-        this.setState({paginating: true});
-
-        debuglog("RoomView: Initiating paginate; backwards:"+backwards);
-        return this._timelineWindow.paginate(dir, PAGINATE_SIZE).then((r) => {
-            debuglog("RoomView: paginate complete backwards:"+backwards+"; success:"+r);
-            this._onTimelineUpdated(r);
-            return r;
-        });
-    },
-
     onResendAllClick: function() {
         var eventsToResend = this._getUnsentMessages(this.state.room);
         eventsToResend.forEach(function(event) {
             Resend.resend(event);
+        });
+    },
+
+    onCancelAllClick: function() {
+        var eventsToResend = this._getUnsentMessages(this.state.room);
+        eventsToResend.forEach(function(event) {
+            Resend.removeFromQueue(event);
         });
     },
 
@@ -676,71 +648,112 @@ module.exports = React.createClass({
                     var SetDisplayNameDialog = sdk.getComponent('views.dialogs.SetDisplayNameDialog');
                     var dialog_defer = q.defer();
                     var dialog_ref;
-                    var modal;
-                    var dialog_instance = <SetDisplayNameDialog currentDisplayName={result.displayname} ref={(r) => {
+                    Modal.createDialog(SetDisplayNameDialog, {
+                        currentDisplayName: result.displayname,
+                        ref: (r) => {
                             dialog_ref = r;
-                    }} onFinished={() => {
-                        cli.setDisplayName(dialog_ref.getValue()).done(() => {
-                            dialog_defer.resolve();
-                        });
-                        modal.close();
-                    }} />
-                    modal = Modal.createDialogWithElement(dialog_instance);
+                        },
+                        onFinished: (submitted) => {
+                            if (submitted) {
+                                cli.setDisplayName(dialog_ref.getValue()).done(() => {
+                                    dialog_defer.resolve();
+                                });
+                            }
+                            else {
+                                dialog_defer.reject();
+                            }
+                        }
+                    });
                     return dialog_defer.promise;
                 }
             });
         }
 
         display_name_promise.then(() => {
-            return MatrixClientPeg.get().joinRoom(this.props.roomId)
-        }).done(function() {
+            var sign_url = this.props.thirdPartyInvite ? this.props.thirdPartyInvite.inviteSignUrl : undefined;
+            return MatrixClientPeg.get().joinRoom(this.props.roomAddress,
+                                                  { inviteSignUrl: sign_url } )
+        }).then(function(resp) {
+            var roomId = resp.roomId;
+
             // It is possible that there is no Room yet if state hasn't come down
             // from /sync - joinRoom will resolve when the HTTP request to join succeeds,
             // NOT when it comes down /sync. If there is no room, we'll keep the
-            // joining flag set until we see it. Likewise, if our state is not
-            // "join" we'll keep this flag set until it comes down /sync.
+            // joining flag set until we see it.
 
             // We'll need to initialise the timeline when joining, but due to
             // the above, we can't do it here: we do it in onRoom instead,
             // once we have a useable room object.
-            var room = MatrixClientPeg.get().getRoom(self.props.roomId);
-            var me = MatrixClientPeg.get().credentials.userId;
-            self.setState({
-                joining: room ? !room.hasMembershipState(me, "join") : true,
-                room: room
-            });
-        }, function(error) {
+            var room = MatrixClientPeg.get().getRoom(roomId);
+            if (!room) {
+                // wait for the room to turn up in onRoom.
+                self._joiningRoomId = roomId;
+            } else {
+                // we've got a valid room, but that might also just mean that
+                // it was peekable (so we had one before anyway).  If we are
+                // not yet a member of the room, we will need to wait for that
+                // to happen, in onRoomStateMember.
+                var me = MatrixClientPeg.get().credentials.userId;
+                self.setState({
+                    joining: !room.hasMembershipState(me, "join"),
+                    room: room
+                });
+            }
+        }).catch(function(error) {
             self.setState({
                 joining: false,
                 joinError: error
             });
-            var msg = error.message ? error.message : JSON.stringify(error);
-            var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
-            Modal.createDialog(ErrorDialog, {
-                title: "Failed to join room",
-                description: msg
-            });
-        });
+
+            if (!error) return;
+
+            // https://matrix.org/jira/browse/SYN-659
+            // Need specific error message if joining a room is refused because the user is a guest and guest access is not allowed
+            if (
+                error.errcode == 'M_GUEST_ACCESS_FORBIDDEN' ||
+                (
+                    error.errcode == 'M_FORBIDDEN' &&
+                    MatrixClientPeg.get().isGuest()
+                )
+            ) {
+                var NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
+                Modal.createDialog(NeedToRegisterDialog, {
+                    title: "Failed to join the room",
+                    description: "This room is private or inaccessible to guests. You may be able to join if you register."
+                });
+            } else {
+                var msg = error.message ? error.message : JSON.stringify(error);
+                var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+                if (msg === "No known servers") {
+                    // minging kludge until https://matrix.org/jira/browse/SYN-678 is fixed
+                    // 'Error when trying to join an empty room should be more explicit'
+                    msg = "It is not currently possible to re-join an empty room.";
+                }
+                Modal.createDialog(ErrorDialog, {
+                    title: "Failed to join room",
+                    description: msg
+                });
+            }
+        }).done();
+
         this.setState({
             joining: true
         });
     },
 
     onMessageListScroll: function(ev) {
-        if (this.refs.messagePanel.isAtBottom() &&
-                !this._timelineWindow.canPaginate(EventTimeline.FORWARDS)) {
-            if (this.state.numUnreadMessages != 0) {
-                this.setState({ numUnreadMessages: 0 });
-            }
-            if (!this.state.atEndOfLiveTimeline) {
-                this.setState({ atEndOfLiveTimeline: true });
-            }
+        if (this.refs.messagePanel.isAtEndOfLiveTimeline()) {
+            this.setState({
+                numUnreadMessages: 0,
+                atEndOfLiveTimeline: true,
+            });
         }
         else {
-            if (this.state.atEndOfLiveTimeline) {
-                this.setState({ atEndOfLiveTimeline: false });
-            }
+            this.setState({
+                atEndOfLiveTimeline: false,
+            });
         }
+        this._updateTopUnreadMessagesBar();
     },
 
     onDragOver: function(ev) {
@@ -776,8 +789,18 @@ module.exports = React.createClass({
 
     uploadFile: function(file) {
         var self = this;
+
+        if (MatrixClientPeg.get().isGuest()) {
+            var NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
+            Modal.createDialog(NeedToRegisterDialog, {
+                title: "Please Register",
+                description: "Guest users can't upload files. Please register to upload."
+            });
+            return;
+        }
+
         ContentMessages.sendContentToRoom(
-            file, this.props.roomId, MatrixClientPeg.get()
+            file, this.state.room.roomId, MatrixClientPeg.get()
         ).done(undefined, function(error) {
             var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
             Modal.createDialog(ErrorDialog, {
@@ -812,7 +835,7 @@ module.exports = React.createClass({
             filter = {
                 // XXX: it's unintuitive that the filter for searching doesn't have the same shape as the v2 filter API :(
                 rooms: [
-                    this.props.roomId
+                    this.state.room.roomId
                 ]
             };
         }
@@ -877,18 +900,11 @@ module.exports = React.createClass({
         });
     },
 
-    _onSearchResultSelected: function(result) {
-        var event = result.context.getEvent();
-        dis.dispatch({
-            action: 'view_room',
-            room_id: event.getRoomId(),
-            event_id: event.getId(),
-        });
-    },
-
     getSearchResultTiles: function() {
         var EventTile = sdk.getComponent('rooms.EventTile');
         var SearchResultTile = sdk.getComponent('rooms.SearchResultTile');
+        var Spinner = sdk.getComponent("elements.Spinner");
+
         var cli = MatrixClientPeg.get();
 
         // XXX: todo: merge overlapping results somehow?
@@ -900,6 +916,12 @@ module.exports = React.createClass({
         }
 
         var ret = [];
+
+        if (this.state.searchInProgress) {
+            ret.push(<li key="search-spinner">
+                         <Spinner />
+                     </li>);
+        }
 
         if (!this.state.searchResults.next_batch) {
             if (this.state.searchResults.results.length == 0) {
@@ -915,12 +937,22 @@ module.exports = React.createClass({
             }
         }
 
+        // once dynamic content in the search results load, make the scrollPanel check
+        // the scroll offsets.
+        var onWidgetLoad = () => {
+            var scrollPanel = this.refs.searchResultsPanel;
+            if (scrollPanel) {
+                scrollPanel.checkScroll();
+            }
+        }
+
         var lastRoomId;
 
         for (var i = this.state.searchResults.results.length - 1; i >= 0; i--) {
             var result = this.state.searchResults.results[i];
 
             var mxEv = result.context.getEvent();
+            var roomId = mxEv.getRoomId();
 
             if (!EventTile.haveTileForEvent(mxEv)) {
                 // XXX: can this ever happen? It will make the result count
@@ -929,7 +961,6 @@ module.exports = React.createClass({
             }
 
             if (this.state.searchScope === 'All') {
-                var roomId = mxEv.getRoomId();
                 if(roomId != lastRoomId) {
                     var room = cli.getRoom(roomId);
 
@@ -946,213 +977,15 @@ module.exports = React.createClass({
                 }
             }
 
+            var resultLink = "#/room/"+roomId+"/"+mxEv.getId();
+
             ret.push(<SearchResultTile key={mxEv.getId()}
                      searchResult={result}
                      searchHighlights={this.state.searchHighlights}
-                     onSelect={this._onSearchResultSelected.bind(this, result)}/>);
+                     resultLink={resultLink}
+                     onWidgetLoad={onWidgetLoad}/>);
         }
         return ret;
-    },
-
-    getEventTiles: function() {
-        var DateSeparator = sdk.getComponent('messages.DateSeparator');
-
-        var ret = [];
-        var count = 0;
-
-        var EventTile = sdk.getComponent('rooms.EventTile');
-
-        var prevEvent = null; // the last event we showed
-        var ghostIndex;
-        var readMarkerIndex;
-        for (var i = 0; i < this.state.events.length; i++) {
-            var mxEv = this.state.events[i];
-
-            if (!EventTile.haveTileForEvent(mxEv)) {
-                continue;
-            }
-            if (this.props.ConferenceHandler && mxEv.getType() === "m.room.member") {
-                if (this.props.ConferenceHandler.isConferenceUser(mxEv.getSender()) ||
-                        this.props.ConferenceHandler.isConferenceUser(mxEv.getStateKey())) {
-                    continue; // suppress conf user join/parts
-                }
-            }
-
-            // now we've decided whether or not to show this message,
-            // add the read up to marker if appropriate
-            // doing this here means we implicitly do not show the marker
-            // if it's at the bottom
-            // NB. it would be better to decide where the read marker was going
-            // when the state changed rather than here in the render method, but
-            // this is where we decide what messages we show so it's the only
-            // place we know whether we're at the bottom or not.
-            var self = this;
-            var mxEvSender = mxEv.sender ? mxEv.sender.userId : null;
-            if (prevEvent && prevEvent.getId() == this.state.readMarkerEventId && mxEvSender != MatrixClientPeg.get().credentials.userId) {
-                var hr;
-                hr = (<hr className="mx_RoomView_myReadMarker" style={{opacity: 1, width: '99%'}} ref={function(n) {
-                    self.readMarkerNode = n;
-                }} />);
-                readMarkerIndex = ret.length;
-                ret.push(<li key="_readupto" className="mx_RoomView_myReadMarker_container">{hr}</li>);
-            }
-
-            // is this a continuation of the previous message?
-            var continuation = false;
-            if (prevEvent !== null) {
-                if (mxEv.sender &&
-                    prevEvent.sender &&
-                    (mxEv.sender.userId === prevEvent.sender.userId) &&
-                    (mxEv.getType() == prevEvent.getType())
-                    )
-                {
-                    continuation = true;
-                }
-            }
-
-            // do we need a date separator since the last event?
-            var ts1 = mxEv.getTs();
-            if ((prevEvent == null && !this.state.canBackPaginate) ||
-                (prevEvent != null &&
-                 new Date(prevEvent.getTs()).toDateString() !== new Date(ts1).toDateString())) {
-                var dateSeparator = <li key={ts1}><DateSeparator key={ts1} ts={ts1}/></li>;
-                ret.push(dateSeparator);
-                continuation = false;
-            }
-
-            var last = false;
-            if (i == this.state.events.length - 1) {
-                // XXX: we might not show a tile for the last event.
-                last = true;
-            }
-
-            var eventId = mxEv.getId();
-            var highlight = (eventId == this.props.highlightedEventId);
-
-            // we can't use local echoes as scroll tokens, because their event IDs change.
-            // Local echos have a send "status".
-            var scrollToken = mxEv.status ? undefined : eventId;
-
-            ret.push(
-                <li key={eventId} 
-                        ref={this._collectEventNode.bind(this, eventId)} 
-                        data-scroll-token={scrollToken}>
-                    <EventTile mxEvent={mxEv} continuation={continuation}
-                        last={last} isSelectedEvent={highlight}/>
-                </li>
-            );
-
-            // A read up to marker has died and returned as a ghost!
-            // Lives in the dom as the ghost of the previous one while it fades away
-            if (eventId == this.state.readMarkerGhostEventId) {
-                ghostIndex = ret.length;
-            }
-
-            prevEvent = mxEv;
-        }
-
-        // splice the read marker ghost in now that we know whether the read receipt
-        // is the last element or not, because we only decide as we're going along.
-        if (readMarkerIndex === undefined && ghostIndex && ghostIndex <= ret.length) {
-            var hr;
-            hr = (<hr className="mx_RoomView_myReadMarker" style={{opacity: 1, width: '99%'}} ref={function(n) {
-                Velocity(n, {opacity: '0', width: '10%'}, {duration: 400, easing: 'easeInSine', delay: 1000, complete: function() {
-                    if (!self.unmounted) self.setState({readMarkerGhostEventId: undefined});
-                }});
-            }} />);
-            ret.splice(ghostIndex, 0, (
-                <li key="_readuptoghost" className="mx_RoomView_myReadMarker_container">{hr}</li>
-            ));
-        }
-
-        return ret;
-    },
-
-    _collectEventNode: function(eventId, node) {
-        if (this.eventNodes == undefined) this.eventNodes = {};
-        this.eventNodes[eventId] = node;
-    },
-
-    _indexForEventId(evId) {
-        for (var i = 0; i < this.state.events.length; ++i) {
-            if (evId == this.state.events[i].getId()) {
-                return i;
-            }
-        }
-        return null;
-    },
-
-    sendReadReceipt: function() {
-        if (!this.state.room) return;
-        if (!this.refs.messagePanel) return;
-
-        // we don't want to see our RR marker dropping down as we scroll
-        // through old history. For now, do this just by leaving the RR where
-        // it is until we hit the bottom of the room, though ultimately we
-        // probably want to keep sending RR, but hide the RR until we reach
-        // the bottom of the room again, or something.
-        if (!this.state.atEndOfLiveTimeline) return;
-
-        var currentReadUpToEventId = this.state.room.getEventReadUpTo(MatrixClientPeg.get().credentials.userId);
-        var currentReadUpToEventIndex = this._indexForEventId(currentReadUpToEventId);
-
-        // We want to avoid sending out read receipts when we are looking at
-        // events in the past which are before the latest RR.
-        //
-        // For now, let's apply a heuristic: if (a) the event corresponding to
-        // the latest RR (either from the server, or sent by ourselves) doesn't
-        // appear in our timeline, and (b) we could forward-paginate the event
-        // timeline, then don't send any more RRs.
-        //
-        // This isn't watertight, as we could be looking at a section of
-        // timeline which is *after* the latest RR (so we should actually send
-        // RRs) - but that is a bit of a niche case. It will sort itself out when
-        // the user eventually hits the live timeline.
-        //
-        if (currentReadUpToEventId && currentReadUpToEventIndex === null &&
-                this._timelineWindow.canPaginate(EventTimeline.FORWARDS)) {
-            return;
-        }
-
-        var lastReadEventIndex = this._getLastDisplayedEventIndexIgnoringOwn();
-        if (lastReadEventIndex === null) return;
-
-        var lastReadEvent = this.state.events[lastReadEventIndex];
-
-        // we also remember the last read receipt we sent to avoid spamming the same one at the server repeatedly
-        if (lastReadEventIndex > currentReadUpToEventIndex && this.last_rr_sent_event_id != lastReadEvent.getId()) {
-            this.last_rr_sent_event_id = lastReadEvent.getId();
-            MatrixClientPeg.get().sendReadReceipt(lastReadEvent).catch(() => {
-                // it failed, so allow retries next time the user is active
-                this.last_rr_sent_event_id = undefined;
-            });
-        }
-    },
-
-    _getLastDisplayedEventIndexIgnoringOwn: function() {
-        if (this.eventNodes === undefined) return null;
-
-        var messageWrapper = this.refs.messagePanel;
-        if (messageWrapper === undefined) return null;
-        var wrapperRect = ReactDOM.findDOMNode(messageWrapper).getBoundingClientRect();
-
-        for (var i = this.state.events.length-1; i >= 0; --i) {
-            var ev = this.state.events[i];
-
-            if (ev.sender && ev.sender.userId == MatrixClientPeg.get().credentials.userId) {
-                continue;
-            }
-
-            var node = this.eventNodes[ev.getId()];
-            if (!node) continue;
-
-            var boundingRect = node.getBoundingClientRect();
-
-            if (boundingRect.bottom < wrapperRect.bottom) {
-                return i;
-            }
-        }
-        return null;
     },
 
     onSettingsClick: function() {
@@ -1160,13 +993,21 @@ module.exports = React.createClass({
     },
 
     onSettingsSaveClick: function() {
+        if (!this.refs.room_settings) return;
+
         this.setState({
             uploadingRoomSettings: true,
         });
-        
-        this.refs.room_settings.setName(this.refs.header.getRoomName());
-        this.refs.room_settings.setTopic(this.refs.header.getTopic());
-        
+
+        var newName = this.refs.header.getEditedName();
+        if (newName !== undefined) {
+            this.refs.room_settings.setName(newName);
+        }
+        var newTopic = this.refs.header.getEditedTopic();
+        if (newTopic !== undefined) {
+            this.refs.room_settings.setTopic(newTopic);
+        }
+
         this.refs.room_settings.save().then((results) => {
             var fails = results.filter(function(result) { return result.state !== "fulfilled" });
             console.log("Settings saved with %s errors", fails.length);
@@ -1195,6 +1036,7 @@ module.exports = React.createClass({
     },
 
     onCancelClick: function() {
+        console.log("updateTint from onCancelClick");
         this.updateTint();
         this.setState({editingRoomSettings: false});
     },
@@ -1202,12 +1044,12 @@ module.exports = React.createClass({
     onLeaveClick: function() {
         dis.dispatch({
             action: 'leave_room',
-            room_id: this.props.roomId,
+            room_id: this.state.room.roomId,
         });
     },
 
     onForgetClick: function() {
-        MatrixClientPeg.get().forget(this.props.roomId).done(function() {
+        MatrixClientPeg.get().forget(this.state.room.roomId).done(function() {
             dis.dispatch({ action: 'view_next_room' });
         }, function(err) {
             var errCode = err.errcode || "unknown error code";
@@ -1224,17 +1066,35 @@ module.exports = React.createClass({
         this.setState({
             rejecting: true
         });
-        MatrixClientPeg.get().leave(this.props.roomId).done(function() {
+        MatrixClientPeg.get().leave(this.state.roomId).done(function() {
             dis.dispatch({ action: 'view_next_room' });
             self.setState({
                 rejecting: false
             });
-        }, function(err) {
-            console.error("Failed to reject invite: %s", err);
+        }, function(error) {
+            console.error("Failed to reject invite: %s", error);
+
+            var msg = error.message ? error.message : JSON.stringify(error);
+            var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+            Modal.createDialog(ErrorDialog, {
+                title: "Failed to reject invite",
+                description: msg
+            });
+
             self.setState({
                 rejecting: false,
-                rejectError: err
+                rejectError: error
             });
+        });
+    },
+
+    onRejectThreepidInviteButtonClicked: function(ev) {
+        // We can reject 3pid invites in the same way that we accept them,
+        // using /leave rather than /join. In the short term though, we
+        // just ignore them.
+        // https://github.com/vector-im/vector-web/issues/1134
+        dis.dispatch({
+            action: 'view_room_directory',
         });
     },
 
@@ -1249,27 +1109,36 @@ module.exports = React.createClass({
         });
     },
 
-    onConferenceNotificationClick: function() {
-        dis.dispatch({
-            action: 'place_call',
-            type: "video",
-            room_id: this.props.roomId
-        });
-    },
-
     // jump down to the bottom of this room, where new events are arriving
     jumpToLiveTimeline: function() {
-        // if we can't forward-paginate the existing timeline, then there
-        // is no point reloading it - just jump straight to the bottom.
-        //
-        // Otherwise, reload the timeline rather than trying to paginate
-        // through all of space-time.
-        if (this._timelineWindow.canPaginate(EventTimeline.FORWARDS)) {
-            this._loadTimeline();
-        } else {
-            if (this.refs.messagePanel) {
-                this.refs.messagePanel.scrollToBottom();
-            }
+        this.refs.messagePanel.jumpToLiveTimeline();
+    },
+
+    // jump up to wherever our read marker is
+    jumpToReadMarker: function() {
+        this.refs.messagePanel.jumpToReadMarker();
+    },
+
+    // update the read marker to match the read-receipt
+    forgetReadMarker: function(ev) {
+        ev.stopPropagation();
+        this.refs.messagePanel.forgetReadMarker();
+    },
+
+    // decide whether or not the top 'unread messages' bar should be shown
+    _updateTopUnreadMessagesBar: function() {
+        if (!this.refs.messagePanel)
+            return;
+
+        var pos = this.refs.messagePanel.getReadMarkerPosition();
+
+        // we want to show the bar if the read-marker is off the top of the
+        // screen.
+        var showBar = (pos < 0);
+
+        if (this.state.showTopUnreadMessagesBar != showBar) {
+            this.setState({showTopUnreadMessagesBar: showBar},
+                          this.onChildResize);
         }
     },
 
@@ -1341,20 +1210,10 @@ module.exports = React.createClass({
         // but it's better than the video going missing entirely
         if (auxPanelMaxHeight < 50) auxPanelMaxHeight = 50;
 
-        if (this.refs.callView) {
-            var video = this.refs.callView.getVideoView().getRemoteVideoElement();
+        this.setState({auxPanelMaxHeight: auxPanelMaxHeight});
 
-            video.style.maxHeight = auxPanelMaxHeight + "px";
-        }
-
-        // we need to do this for general auxPanels too
-        if (this.refs.auxPanel) {
-            this.refs.auxPanel.style.maxHeight = auxPanelMaxHeight + "px";
-        }
-
-        // the above might have made the aux panel resize itself, so now
-        // we need to tell the gemini panel to adapt.
-        this.onChildResize();
+        // changing the maxHeight on the auxpanel will trigger a callback go
+        // onChildResize, so no need to worry about that here.
     },
 
     onFullscreenClick: function() {
@@ -1365,7 +1224,7 @@ module.exports = React.createClass({
     },
 
     onMuteAudioClick: function() {
-        var call = CallHandler.getCallForRoom(this.props.roomId);
+        var call = this._getCallForRoom();
         if (!call) {
             return;
         }
@@ -1377,7 +1236,7 @@ module.exports = React.createClass({
     },
 
     onMuteVideoClick: function() {
-        var call = CallHandler.getCallForRoom(this.props.roomId);
+        var call = this._getCallForRoom();
         if (!call) {
             return;
         }
@@ -1389,65 +1248,130 @@ module.exports = React.createClass({
     },
 
     onChildResize: function() {
-        // When the video or the message composer resizes, the scroll panel
-        // also changes size.  Work around GeminiScrollBar fail by telling it
-        // about it. This also ensures that the scroll offset is updated.
-        if (this.refs.messagePanel) {
-            this.refs.messagePanel.forceUpdate();
-        }
+        // no longer anything to do here
     },
 
     showSettings: function(show) {
         // XXX: this is a bit naughty; we should be doing this via props
         if (show) {
             this.setState({editingRoomSettings: true});
-            var self = this;
-            setTimeout(function() { self.onResize() }, 0);
         }
+    },
+
+    /**
+     * called by the parent component when PageUp/Down/etc is pressed.
+     *
+     * We pass it down to the scroll panel.
+     */
+    handleScrollKey: function(ev) {
+        var panel;
+        if(this.refs.searchResultsPanel) {
+            panel = this.refs.searchResultsPanel;
+        } else if(this.refs.messagePanel) {
+            panel = this.refs.messagePanel;
+        }
+
+        if(panel) {
+            panel.handleScrollKey(ev);
+        }
+    },
+
+    /**
+     * Get the ID of the displayed room
+     *
+     * Returns null if the RoomView was instantiated on a room alias and
+     * we haven't yet joined the room.
+     */
+    getRoomId: function() {
+        if (!this.state.room) {
+            return null;
+        }
+        return this.state.room.roomId;
+    },
+
+    /**
+     * get any current call for this room
+     */
+    _getCallForRoom: function() {
+        if (!this.state.room) {
+            return null;
+        }
+        return CallHandler.getCallForRoom(this.state.room.roomId);
+    },
+
+    // this has to be a proper method rather than an unnamed function,
+    // otherwise react calls it with null on each update.
+    _gatherTimelinePanelRef: function(r) {
+        this.refs.messagePanel = r;
+        if(r) {
+            console.log("updateTint from RoomView._gatherTimelinePanelRef");
+            this.updateTint();
+        }
+    },
+
+    _updateAutoComplete: function() {
+        const myUserId = MatrixClientPeg.get().credentials.userId;
+        const members = this.state.room.getJoinedMembers().filter(function(member) {
+            if (member.userId !== myUserId) return true;
+        });
+        UserProvider.getInstance().setUserList(members);
     },
 
     render: function() {
         var RoomHeader = sdk.getComponent('rooms.RoomHeader');
         var MessageComposer = sdk.getComponent('rooms.MessageComposer');
-        var CallView = sdk.getComponent("voip.CallView");
         var RoomSettings = sdk.getComponent("rooms.RoomSettings");
+        var AuxPanel = sdk.getComponent("rooms.AuxPanel");
         var SearchBar = sdk.getComponent("rooms.SearchBar");
         var ScrollPanel = sdk.getComponent("structures.ScrollPanel");
         var TintableSvg = sdk.getComponent("elements.TintableSvg");
         var RoomPreviewBar = sdk.getComponent("rooms.RoomPreviewBar");
         var Loader = sdk.getComponent("elements.Spinner");
+        var TimelinePanel = sdk.getComponent("structures.TimelinePanel");
 
-        if (!this._timelineWindow) {
-            if (this.props.roomId) {
-                if (this.state.timelineLoading) {
+        if (!this.state.room) {
+                if (this.state.roomLoading) {
                     return (
                         <div className="mx_RoomView">
                             <Loader />
                         </div>
-                    );                
+                    );
                 }
                 else {
-                    var joinErrorText = this.state.joinError ? "Failed to join room!" : "";
+                    var inviterName = undefined;
+                    if (this.props.oobData) {
+                        inviterName = this.props.oobData.inviterName;
+                    }
+                    var invitedEmail = undefined;
+                    if (this.props.thirdPartyInvite) {
+                        invitedEmail = this.props.thirdPartyInvite.invitedEmail;
+                    }
+
+                    // We have no room object for this room, only the ID.
+                    // We've got to this room by following a link, possibly a third party invite.
+                    var room_alias = this.props.roomAddress[0] == '#' ? this.props.roomAddress : null;
                     return (
                         <div className="mx_RoomView">
-                            <RoomHeader ref="header" room={this.state.room} simpleHeader="Join room"/>
+                            <RoomHeader ref="header"
+                                room={this.state.room}
+                                oobData={this.props.oobData}
+                                rightPanelCollapsed={ this.props.rightPanelCollapsed }
+                            />
                             <div className="mx_RoomView_auxPanel">
-                                <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked } 
-                                                canJoin={ true } canPreview={ false }
+                                <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked }
+                                                onRejectClick={ this.onRejectThreepidInviteButtonClicked }
+                                                canPreview={ false } error={ this.state.roomLoadError }
+                                                roomAlias={room_alias}
                                                 spinner={this.state.joining}
+                                                inviterName={inviterName}
+                                                invitedEmail={invitedEmail}
+                                                room={this.state.room}
                                 />
-                                <div className="error">{joinErrorText}</div>
                             </div>
                             <div className="mx_RoomView_messagePanel"></div>
                         </div>
-                    );                    
+                    );
                 }
-            }
-            else {
-                return (
-                    <div />
-                );
-            }
         }
 
         var myUserId = MatrixClientPeg.get().credentials.userId;
@@ -1462,27 +1386,23 @@ module.exports = React.createClass({
             } else {
                 var inviteEvent = myMember.events.member;
                 var inviterName = inviteEvent.sender ? inviteEvent.sender.name : inviteEvent.getSender();
-                // XXX: Leaving this intentionally basic for now because invites are about to change totally
-                // FIXME: This comment is now outdated - what do we need to fix? ^
-                var joinErrorText = this.state.joinError ? "Failed to join room!" : "";
-                var rejectErrorText = this.state.rejectError ? "Failed to reject invite!" : "";
 
                 // We deliberately don't try to peek into invites, even if we have permission to peek
                 // as they could be a spam vector.
                 // XXX: in future we could give the option of a 'Preview' button which lets them view anyway.
 
+                // We have a regular invite for this room.
                 return (
                     <div className="mx_RoomView">
                         <RoomHeader ref="header" room={this.state.room}/>
                         <div className="mx_RoomView_auxPanel">
-                            <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked } 
+                            <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked }
                                             onRejectClick={ this.onRejectButtonClicked }
                                             inviterName={ inviterName }
-                                            canJoin={ true } canPreview={ false }
+                                            canPreview={ false }
                                             spinner={this.state.joining}
+                                            room={this.state.room}
                             />
-                            <div className="error">{joinErrorText}</div>
-                            <div className="error">{rejectErrorText}</div>
                         </div>
                         <div className="mx_RoomView_messagePanel"></div>
                     </div>
@@ -1493,7 +1413,7 @@ module.exports = React.createClass({
         // We have successfully loaded this room, and are not previewing.
         // Display the "normal" room view.
 
-        var call = CallHandler.getCallForRoom(this.props.roomId);
+        var call = this._getCallForRoom();
         var inCall = false;
         if (call && (this.state.callState !== 'ended' && this.state.callState !== 'ringing')) {
             inCall = true;
@@ -1501,35 +1421,27 @@ module.exports = React.createClass({
 
         var scrollheader_classes = classNames({
             mx_RoomView_scrollheader: true,
-            loading: this.state.paginating
         });
 
         var statusBar;
-
-        // for testing UI...
-        // this.state.upload = {
-        //     uploadedBytes: 123493,
-        //     totalBytes: 347534,
-        //     fileName: "testing_fooble.jpg",
-        // }
 
         if (ContentMessages.getCurrentUploads().length > 0) {
             var UploadBar = sdk.getComponent('structures.UploadBar');
             statusBar = <UploadBar room={this.state.room} />
         } else if (!this.state.searchResults) {
             var RoomStatusBar = sdk.getComponent('structures.RoomStatusBar');
-            var tabEntries = this.tabComplete.isTabCompleting() ?
-                this.tabComplete.peek(6) : null;
 
             statusBar = <RoomStatusBar
                 room={this.state.room}
-                tabCompleteEntries={tabEntries}
+                tabComplete={this.tabComplete}
                 numUnreadMessages={this.state.numUnreadMessages}
                 hasUnsentMessages={this.state.hasUnsentMessages}
                 atEndOfLiveTimeline={this.state.atEndOfLiveTimeline}
                 hasActiveCall={inCall}
                 onResendAllClick={this.onResendAllClick}
+                onCancelAllClick={this.onCancelAllClick}
                 onScrollToBottomClick={this.jumpToLiveTimeline}
+                onResize={this.onChildResize}
                 />
         }
 
@@ -1543,45 +1455,39 @@ module.exports = React.createClass({
         else if (this.state.searching) {
             aux = <SearchBar ref="search_bar" searchInProgress={this.state.searchInProgress } onCancelClick={this.onCancelSearchClick} onSearch={this.onSearch}/>;
         }
-        else if (this.state.guestsCanJoin && MatrixClientPeg.get().isGuest() &&
-                (!myMember || myMember.membership !== "join")) {
-            aux = (
-                <RoomPreviewBar onJoinClick={this.onJoinButtonClicked} canJoin={true}
-                                spinner={this.state.joining}
-                />
-            );
-        }
-        else if (this.state.canPeek &&
-                (!myMember || myMember.membership !== "join")) {
-            aux = (
-                <RoomPreviewBar onJoinClick={this.onJoinButtonClicked} canJoin={true}
-                                spinner={this.state.joining}
-                />
-            );
-        }
-
-        var conferenceCallNotification = null;
-        if (this.state.displayConfCallNotification) {
-            var supportedText;
-            if (!MatrixClientPeg.get().supportsVoip()) {
-                supportedText = " (unsupported)";
+        else if (!myMember || myMember.membership !== "join") {
+            // We do have a room object for this room, but we're not currently in it.
+            // We may have a 3rd party invite to it.
+            var inviterName = undefined;
+            if (this.props.oobData) {
+                inviterName = this.props.oobData.inviterName;
             }
-            conferenceCallNotification = (
-                <div className="mx_RoomView_ongoingConfCallNotification" onClick={this.onConferenceNotificationClick}>
-                    Ongoing conference call {supportedText}
-                </div>
+            var invitedEmail = undefined;
+            if (this.props.thirdPartyInvite) {
+                invitedEmail = this.props.thirdPartyInvite.invitedEmail;
+            }
+            aux = (
+                <RoomPreviewBar onJoinClick={this.onJoinButtonClicked}
+                                onRejectClick={this.onRejectThreepidInviteButtonClicked}
+                                spinner={this.state.joining}
+                                inviterName={inviterName}
+                                invitedEmail={invitedEmail}
+                                canPreview={this.state.canPeek}
+                                room={this.state.room}
+                />
             );
         }
 
-        var fileDropTarget = null;
-        if (this.state.draggingFile) {
-            fileDropTarget = <div className="mx_RoomView_fileDropTarget">
-                                <div className="mx_RoomView_fileDropTargetLabel" title="Drop File Here">
-                                    <TintableSvg src="img/upload-big.svg" width="45" height="59"/><br/>
-                                    Drop file here to upload
-                                </div>
-                             </div>;
-        }
+        var auxPanel = (
+            <AuxPanel ref="auxPanel" room={this.state.room}
+              conferenceHandler={this.props.ConferenceHandler}
+              draggingFile={this.state.draggingFile}
+              displayConfCallNotification={this.state.displayConfCallNotification}
+              maxHeight={this.state.auxPanelMaxHeight}
+              onResize={this.onChildResize} >
+                { aux }
+            </AuxPanel>
+        );
 
         var messageComposer, searchInfo;
         var canSpeak = (
@@ -1592,7 +1498,7 @@ module.exports = React.createClass({
             messageComposer =
                 <MessageComposer
                     room={this.state.room} onResize={this.onChildResize} uploadFile={this.uploadFile}
-                    callState={this.state.callState} tabComplete={this.tabComplete} />
+                    callState={this.state.callState} tabComplete={this.tabComplete} opacity={ this.props.opacity }/>
         }
 
         // TODO: Why aren't we storing the term/scope/count in this format
@@ -1624,8 +1530,8 @@ module.exports = React.createClass({
             }
             voiceMuteButton =
                 <div className="mx_RoomView_voipButton" onClick={this.onMuteAudioClick}>
-                    <img src={call.isMicrophoneMuted() ? "img/voice-unmute.svg" : "img/voice-mute.svg"} 
-                         alt={call.isMicrophoneMuted() ? "Click to unmute audio" : "Click to mute audio"} 
+                    <img src={call.isMicrophoneMuted() ? "img/voice-unmute.svg" : "img/voice-mute.svg"}
+                         alt={call.isMicrophoneMuted() ? "Click to unmute audio" : "Click to mute audio"}
                          width="21" height="26"/>
                 </div>
 
@@ -1647,8 +1553,12 @@ module.exports = React.createClass({
 
         if (this.state.searchResults) {
             searchResultsPanel = (
-                <ScrollPanel ref="searchResultsPanel" className="mx_RoomView_messagePanel"
-                        onFillRequest={ this.onSearchResultsFillRequest }>
+                <ScrollPanel ref="searchResultsPanel"
+                    className="mx_RoomView_messagePanel mx_RoomView_searchResultsPanel"
+                    onFillRequest={ this.onSearchResultsFillRequest }
+                    onResize={ this.onSearchResultsResize }
+                    style={{ opacity: this.props.opacity }}
+                >
                     <li className={scrollheader_classes}></li>
                     {this.getSearchResultTiles()}
                 </ScrollPanel>
@@ -1656,52 +1566,40 @@ module.exports = React.createClass({
             hideMessagePanel = true;
         }
 
-        var messagePanel;
+        // console.log("ShowUrlPreview for %s is %s", this.state.room.roomId, this.state.showUrlPreview);
 
-        // just show a spinner while the timeline loads.
-        //
-        // put it in a div of the right class (mx_RoomView_messagePanel) so
-        // that the order in the roomview flexbox is correct, and
-        // mx_RoomView_messageListWrapper to position the inner div in the
-        // right place.
-        //
-        // Note that the click-on-search-result functionality relies on the
-        // fact that the messagePanel is hidden while the timeline reloads,
-        // but that the RoomHeader (complete with search term) continues to
-        // exist.
-        if (this.state.timelineLoading) {
-            messagePanel = (
-                    <div className="mx_RoomView_messagePanel mx_RoomView_messageListWrapper">
-                        <Loader />
-                    </div>
-            );
-        } else {
-            // give the messagepanel a stickybottom if we're at the end of the
-            // live timeline, so that the arrival of new events triggers a
-            // scroll.
-            //
-            // Make sure that stickyBottom is *false* if we can paginate
-            // forwards, otherwise if somebody hits the bottom of the loaded
-            // events when viewing historical messages, we get stuck in a loop
-            // of paginating our way through the entire history of the room.
-            var stickyBottom = !this._timelineWindow.canPaginate(EventTimeline.FORWARDS);
+        var messagePanel = (
+            <TimelinePanel ref={this._gatherTimelinePanelRef}
+                room={this.state.room}
+                hidden={hideMessagePanel}
+                highlightedEventId={this.props.highlightedEventId}
+                eventId={this.props.eventId}
+                eventPixelOffset={this.props.eventPixelOffset}
+                onScroll={ this.onMessageListScroll }
+                onReadMarkerUpdated={ this._updateTopUnreadMessagesBar }
+                showUrlPreview = { this.state.showUrlPreview }
+                opacity={ this.props.opacity }
+            />);
 
-            messagePanel = (
-                <ScrollPanel ref="messagePanel" className="mx_RoomView_messagePanel"
-                        onScroll={ this.onMessageListScroll } 
-                        onFillRequest={ this.onMessageListFillRequest }
-                        style={ hideMessagePanel ? { display: 'none' } : {} }
-                        stickyBottom={ stickyBottom }>
-                    <li className={scrollheader_classes}></li>
-                    {this.getEventTiles()}
-                </ScrollPanel>
+        var topUnreadMessagesBar = null;
+        if (this.state.showTopUnreadMessagesBar) {
+            var TopUnreadMessagesBar = sdk.getComponent('rooms.TopUnreadMessagesBar');
+            topUnreadMessagesBar = (
+                <div className="mx_RoomView_topUnreadMessagesBar mx_fadable" style={{ opacity: this.props.opacity }}>
+                    <TopUnreadMessagesBar
+                       onScrollUpClick={this.jumpToReadMarker}
+                       onCloseClick={this.forgetReadMarker}
+                    />
+                </div>
             );
         }
 
         return (
             <div className={ "mx_RoomView" + (inCall ? " mx_RoomView_inCall" : "") } ref="roomView">
                 <RoomHeader ref="header" room={this.state.room} searchInfo={searchInfo}
+                    oobData={this.props.oobData}
                     editing={this.state.editingRoomSettings}
+                    saving={this.state.uploadingRoomSettings}
                     onSearchClick={this.onSearchClick}
                     onSettingsClick={this.onSettingsClick}
                     onSaveClick={this.onSettingsSaveClick}
@@ -1712,16 +1610,11 @@ module.exports = React.createClass({
                     onLeaveClick={
                         (myMember && myMember.membership === "join") ? this.onLeaveClick : null
                     } />
-                <div className="mx_RoomView_auxPanel" ref="auxPanel">
-                    { fileDropTarget }    
-                    <CallView ref="callView" room={this.state.room} ConferenceHandler={this.props.ConferenceHandler}
-                        onResize={this.onChildResize} />
-                    { conferenceCallNotification }
-                    { aux }
-                </div>
+                { auxPanel }
+                { topUnreadMessagesBar }
                 { messagePanel }
                 { searchResultsPanel }
-                <div className="mx_RoomView_statusArea">
+                <div className="mx_RoomView_statusArea mx_fadable" style={{ opacity: this.props.opacity }}>
                     <div className="mx_RoomView_statusAreaBox">
                         <div className="mx_RoomView_statusAreaBox_line"></div>
                         { statusBar }

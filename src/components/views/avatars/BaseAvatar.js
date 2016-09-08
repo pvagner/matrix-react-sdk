@@ -18,6 +18,7 @@ limitations under the License.
 
 var React = require('react');
 var AvatarLogic = require("../../../Avatar");
+import sdk from '../../../index';
 
 module.exports = React.createClass({
     displayName: 'BaseAvatar',
@@ -99,42 +100,68 @@ module.exports = React.createClass({
         }
     },
 
-    _getInitialLetter: function() {
-        var name = this.props.name;
+    /**
+     * returns the first (non-sigil) character of 'name',
+     * converted to uppercase
+     */
+    _getInitialLetter: function(name) {
+        if (name.length < 1) {
+            return undefined;
+        }
+
+        var idx = 0;
         var initial = name[0];
         if ((initial === '@' || initial === '#') && name[1]) {
-            initial = name[1];
+            idx++;
         }
-        return initial.toUpperCase();
+
+        // string.codePointAt(0) would do this, but that isn't supported by
+        // some browsers (notably PhantomJS).
+        var chars = 1;
+        var first = name.charCodeAt(idx);
+
+        // check if it’s the start of a surrogate pair
+        if (first >= 0xD800 && first <= 0xDBFF && name[idx+1]) {
+            var second = name.charCodeAt(idx+1);
+            if (second >= 0xDC00 && second <= 0xDFFF) {
+                chars++;
+            }
+        }
+
+        var firstChar = name.substring(idx, idx+chars);
+        return firstChar.toUpperCase();
     },
 
     render: function() {
-        var name = this.props.name;
-
+        const EmojiText = sdk.getComponent('elements.EmojiText');
         var imageUrl = this.state.imageUrls[this.state.urlsIndex];
 
+        const {
+            name, idName, title, url, urls, width, height, resizeMethod,
+            defaultToInitialLetter,
+            ...otherProps
+        } = this.props;
+
         if (imageUrl === this.state.defaultImageUrl) {
-            var initialLetter = this._getInitialLetter();
+            const initialLetter = this._getInitialLetter(name);
             return (
-                <span className="mx_BaseAvatar" {...this.props}>
-                    <span className="mx_BaseAvatar_initial" aria-hidden="true"
-                            style={{ fontSize: (this.props.width * 0.65) + "px",
-                                    width: this.props.width + "px",
-                                    lineHeight: this.props.height + "px" }}>
-                        { initialLetter }
-                    </span>
+                <span className="mx_BaseAvatar" {...otherProps}>
+                    <EmojiText className="mx_BaseAvatar_initial" aria-hidden="true"
+                            style={{ fontSize: (width * 0.65) + "px",
+                                    width: width + "px",
+                                    lineHeight: height + "px" }}>{initialLetter}</EmojiText>
                     <img className="mx_BaseAvatar_image" src={imageUrl}
-                        title={this.props.title} onError={this.onError}
-                        width={this.props.width} height={this.props.height} />
+                        alt="" title={title} onError={this.onError}
+                        width={width} height={height} />
                 </span>
-            );            
+            );
         }
         return (
             <img className="mx_BaseAvatar mx_BaseAvatar_image" src={imageUrl}
                 onError={this.onError}
-                width={this.props.width} height={this.props.height}
-                title={this.props.title}
-                {...this.props} />
+                width={width} height={height}
+                title={title} alt=""
+                {...otherProps} />
         );
     }
 });

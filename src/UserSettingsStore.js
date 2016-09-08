@@ -58,6 +58,14 @@ module.exports = {
         Notifier.setEnabled(enable);
     },
 
+    getEnableAudioNotifications: function() {
+        return Notifier.isAudioEnabled();
+    },
+
+    setEnableAudioNotifications: function(enable) {
+        Notifier.setAudioEnabled(enable);
+    },
+
     changePassword: function(old_password, new_password) {
         var cli = MatrixClientPeg.get();
 
@@ -69,4 +77,76 @@ module.exports = {
 
         return cli.setPassword(authDict, new_password);
     },
+
+    /**
+     * Returns the email pusher (pusher of type 'email') for a given
+     * email address. Email pushers all have the same app ID, so since
+     * pushers are unique over (app ID, pushkey), there will be at most
+     * one such pusher.
+     */
+    getEmailPusher: function(pushers, address) {
+        if (pushers === undefined) {
+            return undefined;
+        }
+        for (var i = 0; i < pushers.length; ++i) {
+            if (pushers[i].kind == 'email' && pushers[i].pushkey == address) {
+                return pushers[i];
+            }
+        }
+        return undefined;
+    },
+
+    hasEmailPusher: function(pushers, address) {
+        return this.getEmailPusher(pushers, address) !== undefined;
+    },
+
+    addEmailPusher: function(address, data) {
+        return MatrixClientPeg.get().setPusher({
+            kind: 'email',
+            app_id: "m.email",
+            pushkey: address,
+            app_display_name: 'Email Notifications',
+            device_display_name: address,
+            lang: navigator.language,
+            data: data,
+            append: true,  // We always append for email pushers since we don't want to stop other accounts notifying to the same email address
+        });
+    },
+
+    getUrlPreviewsDisabled: function() {
+        var event = MatrixClientPeg.get().getAccountData("org.matrix.preview_urls");
+        return (event && event.getContent().disable);
+    },
+
+    setUrlPreviewsDisabled: function(disabled) {
+        // FIXME: handle errors
+        return MatrixClientPeg.get().setAccountData("org.matrix.preview_urls", {
+            disable: disabled
+        });
+    },
+
+    getSyncedSettings: function() {
+        var event = MatrixClientPeg.get().getAccountData("im.vector.web.settings");
+        return event ? event.getContent() : {};
+    },
+
+    getSyncedSetting: function(type) {
+        var settings = this.getSyncedSettings();
+        return settings[type];
+    },
+
+    setSyncedSetting: function(type, value) {
+        var settings = this.getSyncedSettings();
+        settings[type] = value;
+        // FIXME: handle errors
+        return MatrixClientPeg.get().setAccountData("im.vector.web.settings", settings);
+    },
+
+    isFeatureEnabled: function(feature: string): boolean {
+        return localStorage.getItem(`mx_labs_feature_${feature}`) === 'true';
+    },
+
+    setFeatureEnabled: function(feature: string, enabled: boolean) {
+        localStorage.setItem(`mx_labs_feature_${feature}`, enabled);
+    }
 };

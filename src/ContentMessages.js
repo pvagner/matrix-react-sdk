@@ -52,6 +52,36 @@ function infoForImageFile(imageFile) {
     return deferred.promise;
 }
 
+function infoForVideoFile(videoFile) {
+    var deferred = q.defer();
+
+    // Load the file into an html element
+    var video = document.createElement("video");
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        video.src = e.target.result;
+
+        // Once ready, returns its size
+        video.onloadedmetadata = function() {
+            deferred.resolve({
+                w: video.videoWidth,
+                h: video.videoHeight
+            });
+        };
+        video.onerror = function(e) {
+            deferred.reject(e);
+        };
+    };
+    reader.onerror = function(e) {
+        deferred.reject(e);
+    };
+    reader.readAsDataURL(videoFile);
+
+    return deferred.promise;
+}
+
+
 class ContentMessages {
     constructor() {
         this.inprogress = [];
@@ -74,8 +104,23 @@ class ContentMessages {
         var def = q.defer();
         if (file.type.indexOf('image/') == 0) {
             content.msgtype = 'm.image';
-            infoForImageFile(file).then(function(imageInfo) {
+            infoForImageFile(file).then(imageInfo=>{
                 extend(content.info, imageInfo);
+                def.resolve();
+            }, error=>{
+                content.msgtype = 'm.file';
+                def.resolve();
+            });
+        } else if (file.type.indexOf('audio/') == 0) {
+            content.msgtype = 'm.audio';
+            def.resolve();
+        } else if (file.type.indexOf('video/') == 0) {
+            content.msgtype = 'm.video';
+            infoForVideoFile(file).then(videoInfo=>{
+                extend(content.info, videoInfo);
+                def.resolve();
+            }, error=>{
+                content.msgtype = 'm.file';
                 def.resolve();
             });
         } else {
@@ -92,6 +137,7 @@ class ContentMessages {
         this.inprogress.push(upload);
         dis.dispatch({action: 'upload_started'});
 
+        var error;
         var self = this;
         return def.promise.then(function() {
             upload.promise = matrixClient.uploadContent(file);
@@ -103,11 +149,10 @@ class ContentMessages {
                 dis.dispatch({action: 'upload_progress', upload: upload});
             }
         }).then(function(url) {
-            dis.dispatch({action: 'upload_finished', upload: upload});
             content.url = url;
             return matrixClient.sendMessage(roomId, content);
         }, function(err) {
-            dis.dispatch({action: 'upload_failed', upload: upload});
+            error = err;
             if (!upload.canceled) {
                 var desc = "The file '"+upload.fileName+"' failed to upload.";
                 if (err.http_status == 413) {
@@ -127,6 +172,12 @@ class ContentMessages {
                     self.inprogress.splice(k, 1);
                     break;
                 }
+            }
+            if (error) {
+                dis.dispatch({action: 'upload_failed', upload: upload});
+            }
+            else {
+                dis.dispatch({action: 'upload_finished', upload: upload});
             }
         });
     }

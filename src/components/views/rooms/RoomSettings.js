@@ -17,9 +17,21 @@ limitations under the License.
 var q = require("q");
 var React = require('react');
 var MatrixClientPeg = require('../../../MatrixClientPeg');
+var SdkConfig = require('../../../SdkConfig');
 var sdk = require('../../../index');
 var Modal = require('../../../Modal');
 var ObjectUtils = require("../../../ObjectUtils");
+var dis = require("../../../dispatcher");
+var ScalarAuthClient = require("../../../ScalarAuthClient");
+var ScalarMessaging = require('../../../ScalarMessaging');
+var UserSettingsStore = require('../../../UserSettingsStore');
+
+// parse a string as an integer; if the input is undefined, or cannot be parsed
+// as an integer, return a default.
+function parseIntWithDefault(val, def) {
+    var res = parseInt(val);
+    return isNaN(res) ? def : res;
+}
 
 module.exports = React.createClass({
     displayName: 'RoomSettings',
@@ -33,18 +45,8 @@ module.exports = React.createClass({
     getInitialState: function() {
         var tags = {};
         Object.keys(this.props.room.tags).forEach(function(tagName) {
-            tags[tagName] = {};
+            tags[tagName] = ['yep'];
         });
-
-        var areNotifsMuted = false;
-        if (!MatrixClientPeg.get().isGuest()) {
-            var roomPushRule = MatrixClientPeg.get().getRoomPushRule("global", this.props.room.roomId);
-            if (roomPushRule) {
-                if (0 <= roomPushRule.actions.indexOf("dont_notify")) {
-                    areNotifsMuted = true;
-                }
-            }
-        }
 
         return {
             name: this._yankValueFromEvent("m.room.name", "name"),
@@ -55,22 +57,69 @@ module.exports = React.createClass({
             power_levels_changed: false,
             tags_changed: false,
             tags: tags,
-            areNotifsMuted: areNotifsMuted
+            // isRoomPublished is loaded async in componentWillMount so when the component
+            // inits, the saved value will always be undefined, however getInitialState()
+            // is also called from the saving code so we must return the correct value here
+            // if we have it (although this could race if the user saves before we load whether
+            // the room is published or not).
+            // Default to false if it's undefined, otherwise react complains about changing
+            // components from uncontrolled to controlled
+            isRoomPublished: this._originalIsRoomPublished || false,
+            scalar_error: null,
         };
     },
-    
+
+    componentWillMount: function() {
+        ScalarMessaging.startListening();
+        MatrixClientPeg.get().getRoomDirectoryVisibility(
+            this.props.room.roomId
+        ).done((result) => {
+            this.setState({ isRoomPublished: result.visibility === "public" });
+            this._originalIsRoomPublished = result.visibility === "public";
+        }, (err) => {
+            console.error("Failed to get room visibility: " + err);
+        });
+
+        if (UserSettingsStore.isFeatureEnabled("integration_management")) {
+            this.scalarClient = new ScalarAuthClient();
+            this.scalarClient.connect().done(() => {
+                this.forceUpdate();
+            }, (err) => {
+                this.setState({
+                    scalar_error: err
+                });
+            })
+        }
+
+        dis.dispatch({
+            action: 'ui_opacity',
+            sideOpacity: 0.3,
+            middleOpacity: 0.3,
+        });
+    },
+
+    componentWillUnmount: function() {
+        ScalarMessaging.stopListening();
+
+        dis.dispatch({
+            action: 'ui_opacity',
+            sideOpacity: 1.0,
+            middleOpacity: 1.0,
+        });
+    },
+
     setName: function(name) {
         this.setState({
             name: name
         });
     },
-    
+
     setTopic: function(topic) {
         this.setState({
             topic: topic
         });
     },
-    
+
     save: function() {
         var stateWasSetDefer = q.defer();
         // the caller may have JUST called setState on stuff, so we need to re-render before saving
@@ -81,13 +130,13 @@ module.exports = React.createClass({
             stateWasSetDefer.resolve();
             this.setState({ _loading: false});
         });
-        
+
         return stateWasSetDefer.promise.then(() => {
             return this._save();
         });
     },
 
-    _save: function() {    
+    _save: function() {
         const roomId = this.props.room.roomId;
         var promises = this.saveAliases(); // returns Promise[]
         var originalState = this.getInitialState();
@@ -112,6 +161,13 @@ module.exports = React.createClass({
             ));
         }
 
+        if (this.state.isRoomPublished !== originalState.isRoomPublished) {
+            promises.push(MatrixClientPeg.get().setRoomDirectoryVisibility(
+                roomId,
+                this.state.isRoomPublished ? "public" : "private"
+            ));
+        }
+
         if (this.state.join_rule !== originalState.join_rule) {
             promises.push(MatrixClientPeg.get().sendStateEvent(
                 roomId, "m.room.join_rules",
@@ -129,12 +185,6 @@ module.exports = React.createClass({
         }
 
 
-        if (this.state.areNotifsMuted !== originalState.areNotifsMuted) {
-            promises.push(MatrixClientPeg.get().setRoomMutePushRule(
-                "global", roomId, this.state.areNotifsMuted
-            ));
-        }
-
         // power levels
         var powerLevels = this._getPowerLevels();
         if (powerLevels) {
@@ -146,7 +196,7 @@ module.exports = React.createClass({
         // tags
         if (this.state.tags_changed) {
             var tagDiffs = ObjectUtils.getKeyValueArrayDiffs(originalState.tags, this.state.tags);
-            // [ {place: add, key: "m.favourite", val: "yep"} ]
+            // [ {place: add, key: "m.favourite", val: ["yep"]} ]
             tagDiffs.forEach(function(diff) {
                 switch (diff.place) {
                     case "add":
@@ -165,11 +215,17 @@ module.exports = React.createClass({
                 }
             });
         }
-        console.log("Performing %s operations", promises.length);
 
         // color scheme
         promises.push(this.saveColor());
-        
+
+        // url preview settings
+        promises.push(this.saveUrlPreviewSettings());
+
+        // encryption
+        promises.push(this.saveEncryption());
+
+        console.log("Performing %s operations: %s", promises.length, JSON.stringify(promises));
         return q.allSettled(promises);
     },
 
@@ -181,6 +237,24 @@ module.exports = React.createClass({
     saveColor: function() {
         if (!this.refs.color_settings) { return q(); }
         return this.refs.color_settings.saveSettings();
+    },
+
+    saveUrlPreviewSettings: function() {
+        if (!this.refs.url_preview_settings) { return q(); }
+        return this.refs.url_preview_settings.saveSettings();
+    },
+
+    saveEncryption: function () {
+        if (!this.refs.encrypt) { return q(); }
+
+        var encrypt = this.refs.encrypt.checked;
+        if (!encrypt) { return q(); }
+
+        var roomId = this.props.room.roomId;
+        return MatrixClientPeg.get().sendStateEvent(
+            roomId, "m.room.encryption",
+            { algorithm: "m.megolm.v1.aes-sha2" }
+        );
     },
 
     _hasDiff: function(strA, strB) {
@@ -217,7 +291,7 @@ module.exports = React.createClass({
             power_levels_changed: true
         });
     },
-    
+
     _yankValueFromEvent: function(stateEventType, keyName, defaultValue) {
         // E.g.("m.room.name","name") would yank the "name" content key from "m.room.name"
         var event = this.props.room.currentState.getStateEvents(stateEventType, '');
@@ -228,11 +302,68 @@ module.exports = React.createClass({
     },
 
     _onHistoryRadioToggle: function(ev) {
-        this.setState({
-            history_visibility: ev.target.value
+        var self = this;
+        var QuestionDialog = sdk.getComponent("dialogs.QuestionDialog");
+
+        // cancel the click unless the user confirms it
+        ev.preventDefault();
+        var value = ev.target.value;
+
+        Modal.createDialog(QuestionDialog, {
+            title: "Privacy warning",
+            description:
+                <div>
+                    Changes to who can read history will only apply to future messages in this room.<br/>
+                    The visibility of existing history will be unchanged.
+                </div>,
+            button: "Continue",
+            onFinished: function(confirmed) {
+                if (confirmed) {
+                    self.setState({
+                        history_visibility: value
+                    });
+                }
+            },
         });
     },
-    
+
+    _onRoomAccessRadioToggle: function(ev) {
+
+        //                         join_rule
+        //                      INVITE  |  PUBLIC
+        //        ----------------------+----------------
+        // guest  CAN_JOIN   | inv_only | pub_with_guest
+        // access ----------------------+----------------
+        //        FORBIDDEN  | inv_only | pub_no_guest
+        //        ----------------------+----------------
+
+        switch (ev.target.value) {
+            case "invite_only":
+                this.setState({
+                    join_rule: "invite",
+                    // we always set guests can_join here as it makes no sense to have
+                    // an invite-only room that guests can't join.  If you explicitly
+                    // invite them, you clearly want them to join, whether they're a
+                    // guest or not.  In practice, guest_access should probably have
+                    // been implemented as part of the join_rules enum.
+                    guest_access: "can_join",
+                });
+                break;
+            case "public_no_guests":
+                this.setState({
+                    join_rule: "public",
+                    guest_access: "forbidden",
+                });
+                break;
+            case "public_with_guests":
+                this.setState({
+                    join_rule: "public",
+                    guest_access: "can_join",
+                });
+                break;
+        }
+    },
+
     _onToggle: function(keyName, checkedValue, uncheckedValue, ev) {
         console.log("Checkbox toggle: %s %s", keyName, ev.target.checked);
         var state = {};
@@ -261,78 +392,112 @@ module.exports = React.createClass({
         });
     },
 
+    mayChangeRoomAccess: function() {
+        var cli = MatrixClientPeg.get();
+        var roomState = this.props.room.currentState;
+        return (roomState.mayClientSendStateEvent("m.room.join_rules", cli) &&
+                roomState.mayClientSendStateEvent("m.room.guest_access", cli))
+    },
+
+    onManageIntegrations(ev) {
+        ev.preventDefault();
+        var IntegrationsManager = sdk.getComponent("views.settings.IntegrationsManager");
+        Modal.createDialog(IntegrationsManager, {
+            src: this.scalarClient.hasCredentials() ?
+                    this.scalarClient.getScalarInterfaceUrlForRoom(this.props.room.roomId) :
+                    null
+        }, "");
+    },
+
+    onLeaveClick() {
+        dis.dispatch({
+            action: 'leave_room',
+            room_id: this.props.room.roomId,
+        });
+    },
+
+    onForgetClick() {
+        // FIXME: duplicated with RoomTagContextualMenu (and dead code in RoomView)
+        MatrixClientPeg.get().forget(this.props.room.roomId).done(function() {
+            dis.dispatch({ action: 'view_next_room' });
+        }, function(err) {
+            var errCode = err.errcode || "unknown error code";
+            var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+            Modal.createDialog(ErrorDialog, {
+                title: "Error",
+                description: `Failed to forget room (${errCode})`
+            });
+        });
+    },
+
+    _renderEncryptionSection: function() {
+        if (!UserSettingsStore.isFeatureEnabled("e2e_encryption")) {
+            return null;
+        }
+
+        var cli = MatrixClientPeg.get();
+        var roomState = this.props.room.currentState;
+        var isEncrypted = cli.isRoomEncrypted(this.props.room.roomId);
+
+        var text = "Encryption is " + (isEncrypted ? "" : "not ") +
+            "enabled in this room.";
+
+        var button;
+        if (!isEncrypted &&
+                roomState.mayClientSendStateEvent("m.room.encryption", cli)) {
+            button = (
+                <label>
+                    <input type="checkbox" ref="encrypt" />
+                    Enable encryption (warning: cannot be disabled again!)
+                </label>
+            );
+        }
+
+        return (
+            <div className="mx_RoomSettings_toggles">
+                <h3>Encryption</h3>
+                <label>{text}</label>
+                {button}
+            </div>
+        );
+    },
+
     render: function() {
         // TODO: go through greying out things you don't have permission to change
         // (or turning them into informative stuff)
 
         var AliasSettings = sdk.getComponent("room_settings.AliasSettings");
         var ColorSettings = sdk.getComponent("room_settings.ColorSettings");
+        var UrlPreviewSettings = sdk.getComponent("room_settings.UrlPreviewSettings");
         var EditableText = sdk.getComponent('elements.EditableText');
         var PowerSelector = sdk.getComponent('elements.PowerSelector');
+        var Loader = sdk.getComponent("elements.Spinner")
 
-        var power_levels = this.props.room.currentState.getStateEvents('m.room.power_levels', '');
-        var events_levels = (power_levels ? power_levels.events : {}) || {};
-        var user_id = MatrixClientPeg.get().credentials.userId;
+        var cli = MatrixClientPeg.get();
+        var roomState = this.props.room.currentState;
+        var user_id = cli.credentials.userId;
 
-        if (power_levels) {
-            power_levels = power_levels.getContent();
+        var power_level_event = roomState.getStateEvents('m.room.power_levels', '');
+        var power_levels = power_level_event ? power_level_event.getContent() : {};
+        var events_levels = power_levels.events || {};
+        var user_levels = power_levels.users || {};
 
-            var ban_level = parseInt(power_levels.ban);
-            var kick_level = parseInt(power_levels.kick);
-            var redact_level = parseInt(power_levels.redact);
-            var invite_level = parseInt(power_levels.invite || 0);
-            var send_level = parseInt(power_levels.events_default || 0);
-            var state_level = parseInt(power_levels.state_default || 0);
-            var default_user_level = parseInt(power_levels.users_default || 0);
+        var ban_level = parseIntWithDefault(power_levels.ban, 50);
+        var kick_level = parseIntWithDefault(power_levels.kick, 50);
+        var redact_level = parseIntWithDefault(power_levels.redact, 50);
+        var invite_level = parseIntWithDefault(power_levels.invite, 50);
+        var send_level = parseIntWithDefault(power_levels.events_default, 0);
+        var state_level = power_level_event ? parseIntWithDefault(power_levels.state_default, 50) : 0;
+        var default_user_level = parseIntWithDefault(power_levels.users_default, 0);
 
-            if (power_levels.ban == undefined) ban_level = 50;
-            if (power_levels.kick == undefined) kick_level = 50;
-            if (power_levels.redact == undefined) redact_level = 50;
-
-            var user_levels = power_levels.users || {};
-
-            var current_user_level = user_levels[user_id];
-            if (current_user_level == undefined) current_user_level = default_user_level;
-
-            var power_level_level = events_levels["m.room.power_levels"];
-            if (power_level_level == undefined) {
-                power_level_level = state_level;
-            }
-
-            var can_change_levels = current_user_level >= power_level_level;
-        } else {
-            var ban_level = 50;
-            var kick_level = 50;
-            var redact_level = 50;
-            var invite_level = 0;
-            var send_level = 0;
-            var state_level = 0;
-            var default_user_level = 0;
-
-            var user_levels = [];
-            var events_levels = [];
-
-            var current_user_level = 0;
-
-            var power_level_level = 0;
-
-            var can_change_levels = false;
+        var current_user_level = user_levels[user_id];
+        if (current_user_level === undefined) {
+            current_user_level = default_user_level;
         }
 
-        var state_default = (parseInt(power_levels ? power_levels.state_default : 0) || 0);
+        var can_change_levels = roomState.mayClientSendStateEvent("m.room.power_levels", cli);
 
-        var room_aliases_level = state_default;
-        if (events_levels['m.room.aliases'] !== undefined) {
-            room_aliases_level = events_levels['m.room.aliases'];
-        }
-        var can_set_room_aliases = current_user_level >= room_aliases_level;
-
-        var canonical_alias_level = state_default;
-        if (events_levels['m.room.canonical_alias'] !== undefined) {
-            canonical_alias_level = events_levels['m.room.canonical_alias'];
-        }
-        var canSetCanonicalAlias = current_user_level >= canonical_alias_level;
-        var canSetTag = true;
+        var canSetTag = !cli.isGuest();
 
         var self = this;
 
@@ -383,6 +548,25 @@ module.exports = React.createClass({
             );
         }
 
+        var leaveButton = null;
+        var myMember = this.props.room.getMember(user_id);
+        if (myMember) {
+            if (myMember.membership === "join") {
+                leaveButton = (
+                    <div className="mx_RoomSettings_leaveButton" onClick={ this.onLeaveClick }>
+                        Leave room
+                    </div>
+                );
+            }
+            else if (myMember.membership === "leave") {
+                leaveButton = (
+                    <div className="mx_RoomSettings_leaveButton" onClick={ this.onForgetClick }>
+                        Forget room
+                    </div>
+                );
+            }
+        }
+
         // TODO: support editing custom events_levels
         // TODO: support editing custom user_levels
 
@@ -397,78 +581,148 @@ module.exports = React.createClass({
             }
         });
 
-        var tagsSection = 
-            <div className="mx_RoomSettings_tags">
-                Tagged as:
-                { canSetTag ?
-                    tags.map(function(tag, i) {
-                        return (<label key={ i }>
-                                    <input type="checkbox"
-                                           ref={ tag.ref }
-                                           checked={ tag.name in self.state.tags }
-                                           onChange={ self._onTagChange.bind(self, tag.name) }/>
-                                    { tag.label }
-                                </label>);
-                    }) : tags.map(function(tag) { return tag.label; }).join(", ")
-                }
-            </div>
+        var tagsSection = null;
+        if (canSetTag || self.state.tags) {
+            var tagsSection =
+                <div className="mx_RoomSettings_tags">
+                    Tagged as: { canSetTag ?
+                        (tags.map(function(tag, i) {
+                            return (<label key={ i }>
+                                        <input type="checkbox"
+                                               ref={ tag.ref }
+                                               checked={ tag.name in self.state.tags }
+                                               onChange={ self._onTagChange.bind(self, tag.name) }/>
+                                        { tag.label }
+                                    </label>);
+                        })) : (self.state.tags && self.state.tags.join) ? self.state.tags.join(", ") : ""
+                    }
+                </div>
+        }
 
         // If there is no history_visibility, it is assumed to be 'shared'.
         // http://matrix.org/docs/spec/r0.0.0/client_server.html#id31
         var historyVisibility = this.state.history_visibility || "shared";
 
-        // FIXME: disable guests_read if the user hasn't turned on shared history
+        var addressWarning;
+        var aliasEvents = this.props.room.currentState.getStateEvents('m.room.aliases') || [];
+        var aliasCount = 0;
+        aliasEvents.forEach((event) => {
+            aliasCount += event.getContent().aliases.length;
+        });
+
+        if (this.state.join_rule === "public" && aliasCount == 0) {
+            addressWarning =
+                <div className="mx_RoomSettings_warning">
+                    To link to a room it must have <a href="#addresses">an address</a>.
+                </div>
+        }
+
+        var inviteGuestWarning;
+        if (this.state.join_rule !== "public" && this.state.guest_access === "forbidden") {
+            inviteGuestWarning =
+                <div className="mx_RoomSettings_warning">
+                    Guests cannot join this room even if explicitly invited. <a href="#" onClick={ (e) => {
+                        this.setState({ join_rule: "invite", guest_access: "can_join" });
+                        e.preventDefault();
+                    }}>Click here to fix</a>.
+                </div>
+        }
+
+        var integrations_section;
+        if (UserSettingsStore.isFeatureEnabled("integration_management")) {
+            let integrations_body;
+
+            if (this.scalarClient.hasCredentials()) {
+                integrations_body = (
+                    <div className="mx_RoomSettings_settings">
+                        <a href="#" onClick={ this.onManageIntegrations }>Manage integrations</a>
+                    </div>
+                );
+            } else if (this.state.scalar_error) {
+                integrations_body = <div className="error">
+                    Unable to contact integrations server
+                </div>;
+            } else {
+                integrations_body = <Loader />;
+            }
+            integrations_section = <div>
+                <h3>Integrations</h3>
+                {integrations_body}
+            </div>;
+        }
+
         return (
             <div className="mx_RoomSettings">
+
+                { leaveButton }
 
                 { tagsSection }
 
                 <div className="mx_RoomSettings_toggles">
-                    <label>
-                        <input type="checkbox" onChange={this._onToggle.bind(this, "areNotifsMuted", true, false)} defaultChecked={this.state.areNotifsMuted}/>
-                        Mute notifications for this room
-                    </label>
-                    <label>
-                        <input type="checkbox" onChange={this._onToggle.bind(this, "join_rule", "invite", "public")}
-                            defaultChecked={this.state.join_rule !== "public"}/>
-                        Make this room private
-                    </label>
-                    <label>
-                        <input type="checkbox" onChange={this._onToggle.bind(this, "guest_access", "can_join", "forbidden")}
-                            defaultChecked={this.state.guest_access === "can_join"}/>
-                        Let guests join this room
-                    </label>
+                    <div className="mx_RoomSettings_settings">
+                        <h3>Who can access this room?</h3>
+                        { inviteGuestWarning }
+                        <label>
+                            <input type="radio" name="roomVis" value="invite_only"
+                                disabled={ !this.mayChangeRoomAccess() }
+                                onChange={this._onRoomAccessRadioToggle}
+                                checked={this.state.join_rule !== "public"}/>
+                            Only people who have been invited
+                        </label>
+                        <label>
+                            <input type="radio" name="roomVis" value="public_no_guests"
+                                disabled={ !this.mayChangeRoomAccess() }
+                                onChange={this._onRoomAccessRadioToggle}
+                                checked={this.state.join_rule === "public" && this.state.guest_access !== "can_join"}/>
+                            Anyone who knows the room's link, apart from guests
+                        </label>
+                        <label>
+                            <input type="radio" name="roomVis" value="public_with_guests"
+                                disabled={ !this.mayChangeRoomAccess() }
+                                onChange={this._onRoomAccessRadioToggle}
+                                checked={this.state.join_rule === "public" && this.state.guest_access === "can_join"}/>
+                            Anyone who knows the room's link, including guests
+                        </label>
+                        { addressWarning }
+                        <br/>
+                        <label>
+                            <input type="checkbox" disabled={ !roomState.mayClientSendStateEvent("m.room.aliases", cli) }
+                                   onChange={ this._onToggle.bind(this, "isRoomPublished", true, false)}
+                                   checked={this.state.isRoomPublished}/>
+                            List this room in { MatrixClientPeg.get().getDomain() }'s room directory?
+                        </label>
+                    </div>
                     <div className="mx_RoomSettings_settings">
                         <h3>Who can read history?</h3>
-                        <label htmlFor="hvis_wr">
-                            <input type="radio" id="hvis_wr" name="historyVis" value="world_readable"
-                                    defaultChecked={historyVisibility === "world_readable"}
+                        <label>
+                            <input type="radio" name="historyVis" value="world_readable"
+                                    disabled={ !roomState.mayClientSendStateEvent("m.room.history_visibility", cli) }
+                                    checked={historyVisibility === "world_readable"}
                                     onChange={this._onHistoryRadioToggle} />
                             Anyone
                         </label>
-                        <label htmlFor="hvis_sh">
-                            <input type="radio" id="hvis_sh" name="historyVis" value="shared"
-                                    defaultChecked={historyVisibility === "shared"}
+                        <label>
+                            <input type="radio" name="historyVis" value="shared"
+                                    disabled={ !roomState.mayClientSendStateEvent("m.room.history_visibility", cli) }
+                                    checked={historyVisibility === "shared"}
                                     onChange={this._onHistoryRadioToggle} />
-                            Members only (since the room began)
+                            Members only (since the point in time of selecting this option)
                         </label>
-                        <label htmlFor="hvis_inv">
-                            <input type="radio" id="hvis_inv" name="historyVis" value="invited"
-                                    defaultChecked={historyVisibility === "invited"}
+                        <label>
+                            <input type="radio" name="historyVis" value="invited"
+                                    disabled={ !roomState.mayClientSendStateEvent("m.room.history_visibility", cli) }
+                                    checked={historyVisibility === "invited"}
                                     onChange={this._onHistoryRadioToggle} />
                             Members only (since they were invited)
                         </label>
-                        <label htmlFor="hvis_joi">
-                            <input type="radio" id="hvis_joi" name="historyVis" value="joined"
-                                    defaultChecked={historyVisibility === "joined"}
+                        <label >
+                            <input type="radio" name="historyVis" value="joined"
+                                    disabled={ !roomState.mayClientSendStateEvent("m.room.history_visibility", cli) }
+                                    checked={historyVisibility === "joined"}
                                     onChange={this._onHistoryRadioToggle} />
                             Members only (since they joined)
                         </label>
                     </div>
-                    <label className="mx_RoomSettings_encrypt">
-                        <input type="checkbox" />
-                        Encrypt room
-                    </label>
                 </div>
 
 
@@ -477,49 +731,55 @@ module.exports = React.createClass({
                     <ColorSettings ref="color_settings" room={this.props.room} />
                 </div>
 
+                { integrations_section }
+
+                <a id="addresses"/>
+
                 <AliasSettings ref="alias_settings"
                     roomId={this.props.room.roomId}
-                    canSetCanonicalAlias={canSetCanonicalAlias}
-                    canSetAliases={can_set_room_aliases}
+                    canSetCanonicalAlias={ roomState.mayClientSendStateEvent("m.room.canonical_alias", cli) }
+                    canSetAliases={ roomState.mayClientSendStateEvent("m.room.aliases", cli) }
                     canonicalAliasEvent={this.props.room.currentState.getStateEvents('m.room.canonical_alias', '')}
                     aliasEvents={this.props.room.currentState.getStateEvents('m.room.aliases')} />
+
+                <UrlPreviewSettings ref="url_preview_settings" room={this.props.room} />
 
                 <h3>Permissions</h3>
                 <div className="mx_RoomSettings_powerLevels mx_RoomSettings_settings">
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">The default role for new room members is </span>
-                        <PowerSelector ref="users_default" value={default_user_level} disabled={!can_change_levels || current_user_level < default_user_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="users_default" value={default_user_level} controlled={false} disabled={!can_change_levels || current_user_level < default_user_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To send messages, you must be a </span>
-                        <PowerSelector ref="events_default" value={send_level} disabled={!can_change_levels || current_user_level < send_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="events_default" value={send_level} controlled={false} disabled={!can_change_levels || current_user_level < send_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To invite users into the room, you must be a </span>
-                        <PowerSelector ref="invite" value={invite_level} disabled={!can_change_levels || current_user_level < invite_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="invite" value={invite_level} controlled={false} disabled={!can_change_levels || current_user_level < invite_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To configure the room, you must be a </span>
-                        <PowerSelector ref="state_default" value={state_level} disabled={!can_change_levels || current_user_level < state_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="state_default" value={state_level} controlled={false} disabled={!can_change_levels || current_user_level < state_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To kick users, you must be a </span>
-                        <PowerSelector ref="kick" value={kick_level} disabled={!can_change_levels || current_user_level < kick_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="kick" value={kick_level} controlled={false} disabled={!can_change_levels || current_user_level < kick_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To ban users, you must be a </span>
-                        <PowerSelector ref="ban" value={ban_level} disabled={!can_change_levels || current_user_level < ban_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="ban" value={ban_level} controlled={false} disabled={!can_change_levels || current_user_level < ban_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
                     <div className="mx_RoomSettings_powerLevel">
                         <span className="mx_RoomSettings_powerLevelKey">To redact messages, you must be a </span>
-                        <PowerSelector ref="redact" value={redact_level} disabled={!can_change_levels || current_user_level < redact_level} onChange={this.onPowerLevelsChanged}/>
+                        <PowerSelector ref="redact" value={redact_level} controlled={false} disabled={!can_change_levels || current_user_level < redact_level} onChange={this.onPowerLevelsChanged}/>
                     </div>
 
                     {Object.keys(events_levels).map(function(event_type, i) {
                         return (
                             <div className="mx_RoomSettings_powerLevel" key={event_type}>
                                 <span className="mx_RoomSettings_powerLevelKey">To send events of type <code>{ event_type }</code>, you must be a </span>
-                                <PowerSelector value={ events_levels[event_type] } disabled={true} onChange={self.onPowerLevelsChanged}/>
+                                <PowerSelector value={ events_levels[event_type] } controlled={false} disabled={true} onChange={self.onPowerLevelsChanged}/>
                             </div>
                         );
                     })}
@@ -531,11 +791,12 @@ module.exports = React.createClass({
 
                 { bannedUsersSection }
 
+                { this._renderEncryptionSection() }
+
                 <h3>Advanced</h3>
                 <div className="mx_RoomSettings_settings">
                     This room's internal ID is <code>{ this.props.room.roomId }</code>
                 </div>
-
             </div>
         );
     }

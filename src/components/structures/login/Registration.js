@@ -22,6 +22,7 @@ var sdk = require('../../../index');
 var dis = require('../../../dispatcher');
 var Signup = require("../../../Signup");
 var ServerConfig = require("../../views/login/ServerConfig");
+var MatrixClientPeg = require("../../../MatrixClientPeg");
 var RegistrationForm = require("../../views/login/RegistrationForm");
 var CaptchaForm = require("../../views/login/CaptchaForm");
 
@@ -36,22 +37,36 @@ module.exports = React.createClass({
         sessionId: React.PropTypes.string,
         registrationUrl: React.PropTypes.string,
         idSid: React.PropTypes.string,
-        hsUrl: React.PropTypes.string,
-        isUrl: React.PropTypes.string,
+        customHsUrl: React.PropTypes.string,
+        customIsUrl: React.PropTypes.string,
+        defaultHsUrl: React.PropTypes.string,
+        defaultIsUrl: React.PropTypes.string,
+        brand: React.PropTypes.string,
         email: React.PropTypes.string,
         username: React.PropTypes.string,
         guestAccessToken: React.PropTypes.string,
-        disableUsernameChanges: React.PropTypes.bool,
+
+        defaultDeviceDisplayName: React.PropTypes.string,
+
         // registration shouldn't know or care how login is done.
-        onLoginClick: React.PropTypes.func.isRequired
+        onLoginClick: React.PropTypes.func.isRequired,
+        onCancelClick: React.PropTypes.func
     },
 
     getInitialState: function() {
         return {
             busy: false,
             errorText: null,
-            enteredHomeserverUrl: this.props.hsUrl,
-            enteredIdentityServerUrl: this.props.isUrl
+            // We remember the values entered by the user because
+            // the registration form will be unmounted during the
+            // course of registration, but if there's an error we
+            // want to bring back the registration form with the
+            // values the user entered still in it. We can keep
+            // them in this component's state since this component
+            // persist for the duration of the registration process.
+            formVals: {
+                email: this.props.email,
+            },
         };
     },
 
@@ -59,7 +74,9 @@ module.exports = React.createClass({
         this.dispatcherRef = dis.register(this.onAction);
         // attach this to the instance rather than this.state since it isn't UI
         this.registerLogic = new Signup.Register(
-            this.props.hsUrl, this.props.isUrl
+            this.props.customHsUrl, this.props.customIsUrl, {
+                defaultDeviceDisplayName: this.props.defaultDeviceDisplayName,
+            }
         );
         this.registerLogic.setClientSecret(this.props.clientSecret);
         this.registerLogic.setSessionId(this.props.sessionId);
@@ -106,8 +123,15 @@ module.exports = React.createClass({
         var self = this;
         this.setState({
             errorText: "",
-            busy: true
+            busy: true,
+            formVals: formVals,
         });
+
+        if (formVals.username !== this.props.username) {
+            // don't try to upgrade if we changed our username
+            this.registerLogic.setGuestAccessToken(null);
+        }
+
         this.onProcessingRegistration(this.registerLogic.register(formVals));
     },
 
@@ -115,6 +139,9 @@ module.exports = React.createClass({
     onProcessingRegistration: function(promise) {
         var self = this;
         promise.done(function(response) {
+            self.setState({
+                busy: false
+            });
             if (!response || !response.access_token) {
                 console.warn(
                     "FIXME: Register fulfilled without a final response, " +
@@ -126,19 +153,37 @@ module.exports = React.createClass({
             if (!response || !response.user_id || !response.access_token) {
                 console.error("Final response is missing keys.");
                 self.setState({
-                    errorText: "There was a problem processing the response."
+                    errorText: "Registration failed on server"
                 });
                 return;
             }
             self.props.onLoggedIn({
                 userId: response.user_id,
+                deviceId: response.device_id,
                 homeserverUrl: self.registerLogic.getHomeserverUrl(),
                 identityServerUrl: self.registerLogic.getIdentityServerUrl(),
                 accessToken: response.access_token
             });
-            self.setState({
-                busy: false
-            });
+
+            if (self.props.brand) {
+                MatrixClientPeg.get().getPushers().done((resp)=>{
+                    var pushers = resp.pushers;
+                    for (var i = 0; i < pushers.length; ++i) {
+                        if (pushers[i].kind == 'email') {
+                            var emailPusher = pushers[i];
+                            emailPusher.data = { brand: self.props.brand };
+                            MatrixClientPeg.get().setPusher(emailPusher).done(() => {
+                                console.log("Set email branding to " + self.props.brand);
+                            }, (error) => {
+                                console.error("Couldn't set email branding: " + error);
+                            });
+                        }
+                    }
+                }, (error) => {
+                    console.error("Couldn't get pushers: " + error);
+                });
+            }
+
         }, function(err) {
             if (err.message) {
                 self.setState({
@@ -200,12 +245,15 @@ module.exports = React.createClass({
                 break; // NOP
             case "Register.START":
             case "Register.STEP_m.login.dummy":
+                // NB. Our 'username' prop is specifically for upgrading
+                // a guest account
                 registerStep = (
                     <RegistrationForm
                         showEmail={true}
-                        defaultUsername={this.props.username}
-                        defaultEmail={this.props.email}
-                        disableUsernameChanges={this.props.disableUsernameChanges}
+                        defaultUsername={this.state.formVals.username}
+                        defaultEmail={this.state.formVals.email}
+                        defaultPassword={this.state.formVals.password}
+                        guestUsername={this.props.username}
                         minPasswordLength={MIN_PASSWORD_LENGTH}
                         onError={this.onFormValidationFailed}
                         onRegisterClick={this.onFormSubmit} />
@@ -234,6 +282,15 @@ module.exports = React.createClass({
                 <Spinner />
             );
         }
+
+        var returnToAppJsx;
+        if (this.props.onCancelClick) {
+            returnToAppJsx =
+                <a className="mx_Login_create" onClick={this.props.onCancelClick} href="#">
+                    Return to app
+                </a>
+        }
+
         return (
             <div>
                 <h2>Create an account</h2>
@@ -241,26 +298,33 @@ module.exports = React.createClass({
                 <div className="mx_Login_error">{this.state.errorText}</div>
                 {busySpinner}
                 <ServerConfig ref="serverConfig"
-                    withToggleButton={true}
-                    defaultHsUrl={this.state.enteredHomeserverUrl}
-                    defaultIsUrl={this.state.enteredIdentityServerUrl}
+                    withToggleButton={ this.registerLogic.getStep() === "Register.START" }
+                    customHsUrl={this.props.customHsUrl}
+                    customIsUrl={this.props.customIsUrl}
+                    defaultHsUrl={this.props.defaultHsUrl}
+                    defaultIsUrl={this.props.defaultIsUrl}
                     onHsUrlChanged={this.onHsUrlChanged}
                     onIsUrlChanged={this.onIsUrlChanged}
                     delayTimeMs={1000} />
+                <div className="mx_Login_error">
+                </div>
                 <a className="mx_Login_create" onClick={this.props.onLoginClick} href="#">
                     I already have an account
                 </a>
+                { returnToAppJsx }
             </div>
         );
     },
 
     render: function() {
         var LoginHeader = sdk.getComponent('login.LoginHeader');
+        var LoginFooter = sdk.getComponent('login.LoginFooter');
         return (
             <div className="mx_Login">
                 <div className="mx_Login_box">
                     <LoginHeader />
                     {this._getRegisterContentJsx()}
+                    <LoginFooter />
                 </div>
             </div>
         );

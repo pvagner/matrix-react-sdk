@@ -1,9 +1,27 @@
+/*
+Copyright 2015, 2016 OpenMarket Ltd
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 var MatrixClientPeg = require("./MatrixClientPeg");
+var CallHandler = require("./CallHandler");
 
 function textForMemberEvent(ev) {
     // XXX: SYJS-16 "sender is sometimes null for join messages"
     var senderName = ev.sender ? ev.sender.name : ev.getSender();
     var targetName = ev.target ? ev.target.name : ev.getStateKey();
+    var ConferenceHandler = CallHandler.getConferenceHandler();
     var reason = ev.getContent().reason ? (
         " Reason: " + ev.getContent().reason
     ) : "";
@@ -11,14 +29,20 @@ function textForMemberEvent(ev) {
         case 'invite':
             var threePidContent = ev.getContent().third_party_invite;
             if (threePidContent) {
-                // TODO: When we have third_party_invite.display_name we should
-                // do this as "$displayname received the invitation from $sender"
-                // or equiv
-                return targetName + " received an invitation from " + senderName +
-                    ".";
+                if (threePidContent.display_name) {
+                    return targetName + " accepted the invitation for " +
+                        threePidContent.display_name + ".";
+                } else {
+                    return targetName + " accepted an invitation.";
+                }
             }
             else {
-                return senderName + " invited " + targetName + ".";
+                if (ConferenceHandler && ConferenceHandler.isConferenceUser(ev.getStateKey())) {
+                    return senderName + " requested a VoIP conference";
+                }
+                else {
+                    return senderName + " invited " + targetName + ".";
+                }
             }
         case 'ban':
             return senderName + " banned " + targetName + "." + reason;
@@ -31,22 +55,38 @@ function textForMemberEvent(ev) {
                 } else if (!ev.getPrevContent().displayname && ev.getContent().displayname) {
                     return ev.getSender() + " set their display name to " + ev.getContent().displayname;
                 } else if (ev.getPrevContent().displayname && !ev.getContent().displayname) {
-                    return ev.getSender() + " removed their display name";
+                    return ev.getSender() + " removed their display name (" + ev.getPrevContent().displayname + ")";
                 } else if (ev.getPrevContent().avatar_url && !ev.getContent().avatar_url) {
-                    return ev.getSender() + " removed their profile picture";
+                    return senderName + " removed their profile picture";
                 } else if (ev.getPrevContent().avatar_url && ev.getContent().avatar_url && ev.getPrevContent().avatar_url != ev.getContent().avatar_url) {
-                    return ev.getSender() + " changed their profile picture";
+                    return senderName + " changed their profile picture";
                 } else if (!ev.getPrevContent().avatar_url && ev.getContent().avatar_url) {
-                    return ev.getSender() + " set a profile picture";
+                    return senderName + " set a profile picture";
+                } else {
+                    // hacky hack for https://github.com/vector-im/vector-web/issues/2020
+                    return senderName + " rejoined the room.";
                 }
             } else {
                 if (!ev.target) console.warn("Join message has no target! -- " + ev.getContent().state_key);
-                return targetName + " joined the room.";
+                if (ConferenceHandler && ConferenceHandler.isConferenceUser(ev.getStateKey())) {
+                    return "VoIP conference started";
+                }
+                else {
+                    return targetName + " joined the room.";
+                }
             }
             return '';
         case 'leave':
             if (ev.getSender() === ev.getStateKey()) {
-                return targetName + " left the room.";
+                if (ConferenceHandler && ConferenceHandler.isConferenceUser(ev.getStateKey())) {
+                    return "VoIP conference finished";
+                }
+                else if (ev.getPrevContent().membership === "invite") {
+                    return targetName + " rejected the invitation.";
+                }
+                else {
+                    return targetName + " left the room.";
+                }
             }
             else if (ev.getPrevContent().membership === "ban") {
                 return senderName + " unbanned " + targetName + ".";
@@ -117,6 +157,28 @@ function textForThreePidInviteEvent(event) {
      " to join the room.";
 };
 
+function textForHistoryVisibilityEvent(event) {
+    var senderName = event.sender ? event.sender.name : event.getSender();
+    var vis = event.getContent().history_visibility;
+    var text = senderName + " made future room history visible to ";
+    if (vis === "invited") {
+        text += "all room members, from the point they are invited.";
+    }
+    else if (vis === "joined") {
+        text += "all room members, from the point they joined.";
+    }
+    else if (vis === "shared") {
+        text += "all room members.";
+    }
+    else if (vis === "world_readable") {
+        text += "anyone.";
+    }
+    else {
+        text += " unknown (" + vis + ")";
+    }
+    return text;
+};
+
 var handlers = {
     'm.room.message': textForMessageEvent,
     'm.room.name':    textForRoomNameEvent,
@@ -125,7 +187,8 @@ var handlers = {
     'm.call.invite':  textForCallInviteEvent,
     'm.call.answer':  textForCallAnswerEvent,
     'm.call.hangup':  textForCallHangupEvent,
-    'm.room.third_party_invite': textForThreePidInviteEvent
+    'm.room.third_party_invite': textForThreePidInviteEvent,
+    'm.room.history_visibility': textForHistoryVisibilityEvent,
 };
 
 module.exports = {

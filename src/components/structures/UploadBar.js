@@ -45,6 +45,17 @@ module.exports = React.createClass({displayName: 'UploadBar',
 
     render: function() {
         var uploads = ContentMessages.getCurrentUploads();
+
+        // for testing UI... - also fix up the ContentMessages.getCurrentUploads().length
+        // check in RoomView
+        //
+        // uploads = [{
+        //     roomId: this.props.room.roomId,
+        //     loaded: 123493,
+        //     total: 347534,
+        //     fileName: "testing_fooble.jpg",
+        // }];
+
         if (uploads.length == 0) {
             return <div />
         }
@@ -71,7 +82,7 @@ module.exports = React.createClass({displayName: 'UploadBar',
 
         var others;
         if (uploads.length > 1) {
-            others = 'and '+(uploads.length - 1) + ' other' + (uploads.length > 2 ? 's' : '');
+            others = ' and ' + (uploads.length - 1) + ' other' + (uploads.length > 2 ? 's' : '');
         }
 
         return (

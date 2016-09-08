@@ -25,6 +25,18 @@ var dis = require('../../../dispatcher');
 module.exports = React.createClass({
     displayName: 'VideoView',
 
+    propTypes: {
+        // maxHeight style attribute for the video element
+        maxHeight: React.PropTypes.number,
+
+        // a callback which is called when the user clicks on the video div
+        onClick: React.PropTypes.func,
+
+        // a callback which is called when the video element is resized due to
+        // a change in video metadata
+        onResize: React.PropTypes.func,
+    },
+
     componentDidMount: function() {
         this.dispatcherRef = dis.register(this.onAction);
     },
@@ -38,7 +50,14 @@ module.exports = React.createClass({
     },
 
     getRemoteAudioElement: function() {
-        return this.refs.remoteAudio;
+        // this needs to be somewhere at the top of the DOM which
+        // always exists to avoid audio interruptions.
+        // Might as well just use DOM.
+        var remoteAudioElement = document.getElementById("remoteAudio");
+        if (!remoteAudioElement) {
+            console.error("Failed to find remoteAudio element - cannot play audio!  You need to add an <audio/> to the DOM.");
+        }
+        return remoteAudioElement;
     },
 
     getLocalVideoElement: function() {
@@ -82,11 +101,18 @@ module.exports = React.createClass({
 
     render: function() {
         var VideoFeed = sdk.getComponent('voip.VideoFeed');
+
+        // if we're fullscreen, we don't want to set a maxHeight on the video element.
+        var fullscreenElement = (document.fullscreenElement ||
+                 document.mozFullScreenElement ||
+                 document.webkitFullscreenElement);
+        var maxVideoHeight = fullscreenElement ? null : this.props.maxHeight;
+
         return (
             <div className="mx_VideoView" ref={this.setContainer} onClick={ this.props.onClick }>
                 <div className="mx_VideoView_remoteVideoFeed">
-                    <VideoFeed ref="remote" onResize={this.props.onResize}/>
-                    <audio ref="remoteAudio"/>
+                    <VideoFeed ref="remote" onResize={this.props.onResize}
+                        maxHeight={maxVideoHeight} />
                 </div>
                 <div className="mx_VideoView_localVideoFeed">                
                     <VideoFeed ref="local"/>

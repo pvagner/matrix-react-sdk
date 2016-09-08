@@ -69,6 +69,7 @@ class Entry {
 class CommandEntry extends Entry {
     constructor(cmd, cmdWithArgs) {
         super(cmdWithArgs);
+        this.kind = 'command';
         this.cmd = cmd;
     }
 
@@ -93,8 +94,9 @@ CommandEntry.fromCommands = function(commandArray) {
 
 class MemberEntry extends Entry {
     constructor(member) {
-        super(member.name || member.userId);
+        super((member.name || member.userId).replace(' (IRC)', ''));
         this.member = member;
+        this.kind = 'member';
     }
 
     getImageJsx() {
@@ -114,30 +116,7 @@ class MemberEntry extends Entry {
 }
 
 MemberEntry.fromMemberList = function(members) {
-    return members.sort(function(a, b) {
-        var userA = a.user;
-        var userB = b.user;
-        if (userA && !userB) {
-            return -1; // a comes first
-        }
-        else if (!userA && userB) {
-            return 1; // b comes first
-        }
-        else if (!userA && !userB) {
-            return 0; // don't care
-        }
-        else { // both User objects exist
-            if (userA.lastActiveAgo < userB.lastActiveAgo) {
-                return -1; // a comes first
-            }
-            else if (userA.lastActiveAgo > userB.lastActiveAgo) {
-                return 1; // b comes first
-            }
-            else {
-                return 0; // same last active ago
-            }
-        }
-    }).map(function(m) {
+    return members.map(function(m) {
         return new MemberEntry(m);
     });
 }

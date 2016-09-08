@@ -18,8 +18,10 @@ var React = require("react");
 var ReactDOM = require("react-dom");
 var GeminiScrollbar = require('react-gemini-scrollbar');
 var q = require("q");
+var KeyCode = require('../../KeyCode');
 
 var DEBUG_SCROLL = false;
+// var DEBUG_SCROLL = true;
 
 if (DEBUG_SCROLL) {
     // using bind means that we get to keep useful line numbers in the console
@@ -54,7 +56,7 @@ if (DEBUG_SCROLL) {
  *     offset.  We don't save the absolute scroll offset, because that would be
  *     affected by window width, zoom level, amount of scrollback, etc. Instead
  *     we save an identifier for the last fully-visible message, and the number
- *     of pixels the window was scrolled below it - which is hopefully be near
+ *     of pixels the window was scrolled below it - which is hopefully near
  *     enough.
  *
  * The 'stickyBottom' property controls the behaviour when we reach the bottom
@@ -94,6 +96,11 @@ module.exports = React.createClass({
          */
         onScroll: React.PropTypes.func,
 
+        /* onResize: a callback which is called whenever the Gemini scroll
+         * panel is resized
+         */
+        onResize: React.PropTypes.func,
+
         /* className: classnames to add to the top-level div
          */
         className: React.PropTypes.string,
@@ -124,10 +131,9 @@ module.exports = React.createClass({
         // after adding event tiles, we may need to tweak the scroll (either to
         // keep at the bottom of the timeline, or to maintain the view after
         // adding events to the top).
-        this._restoreSavedScrollState();
-
-        // we also re-check the fill state, in case the paginate was inadequate
-        this.checkFillState();
+        //
+        // This will also re-check the fill state, in case the paginate was inadequate
+        this.checkScroll();
     },
 
     componentWillUnmount: function() {
@@ -140,7 +146,8 @@ module.exports = React.createClass({
 
     onScroll: function(ev) {
         var sn = this._getScrollNode();
-        debuglog("Scroll event: offset now:", sn.scrollTop, "recentEventScroll:", this.recentEventScroll);
+        debuglog("Scroll event: offset now:", sn.scrollTop,
+                 "_lastSetScroll:", this._lastSetScroll);
 
         // Sometimes we see attempts to write to scrollTop essentially being
         // ignored. (Or rather, it is successfully written, but on the next
@@ -154,13 +161,10 @@ module.exports = React.createClass({
         // By way of a workaround, we detect this situation and just keep
         // resetting scrollTop until we see the scroll node have the right
         // value.
-        if (this.recentEventScroll !== undefined) {
-            if(sn.scrollTop < this.recentEventScroll-200) {
-                console.log("Working around vector-im/vector-web#528");
-                this._restoreSavedScrollState();
-                return;
-            }
-            this.recentEventScroll = undefined;
+        if (this._lastSetScroll !== undefined && sn.scrollTop < this._lastSetScroll-200) {
+            console.log("Working around vector-im/vector-web#528");
+            this._restoreSavedScrollState();
+            return;
         }
 
         // If there weren't enough children to fill the viewport, the scroll we
@@ -171,10 +175,27 @@ module.exports = React.createClass({
             this._saveScrollState();
         } else {
             debuglog("Ignoring scroll echo");
+
+            // only ignore the echo once, otherwise we'll get confused when the
+            // user scrolls away from, and back to, the autoscroll point.
+            this._lastSetScroll = undefined;
         }
 
         this.props.onScroll(ev);
 
+        this.checkFillState();
+    },
+
+    onResize: function() {
+        this.props.onResize();
+        this.checkScroll();
+        this.refs.geminiPanel.forceUpdate();
+    },
+
+    // after an update to the contents of the panel, check that the scroll is
+    // where it ought to be, and set off pagination requests if necessary.
+    checkScroll: function() {
+        this._restoreSavedScrollState();
         this.checkFillState();
     },
 
@@ -306,30 +327,83 @@ module.exports = React.createClass({
         this.scrollState = {stuckAtBottom: true};
     },
 
+    /**
+     * jump to the top of the content.
+     */
+    scrollToTop: function() {
+        this._setScrollTop(0);
+        this._saveScrollState();
+    },
+
+    /**
+     * jump to the bottom of the content.
+     */
     scrollToBottom: function() {
         // the easiest way to make sure that the scroll state is correctly
         // saved is to do the scroll, then save the updated state. (Calculating
         // it ourselves is hard, and we can't rely on an onScroll callback
         // happening, since there may be no user-visible change here).
-        var scrollNode = this._getScrollNode();
-
-        scrollNode.scrollTop = scrollNode.scrollHeight;
-        debuglog("Scrolled to bottom; offset now", scrollNode.scrollTop);
-        this._lastSetScroll = scrollNode.scrollTop;
-
+        this._setScrollTop(Number.MAX_VALUE);
         this._saveScrollState();
     },
 
-    // pixelOffset gives the number of pixels between the bottom of the node
-    // and the bottom of the container. If undefined, it will put the node
-    // in the middle of the container.
-    scrollToToken: function(scrollToken, pixelOffset) {
+    /**
+     * Page up/down.
+     *
+     * mult: -1 to page up, +1 to page down
+     */
+    scrollRelative: function(mult) {
         var scrollNode = this._getScrollNode();
+        var delta = mult * scrollNode.clientHeight * 0.5;
+        this._setScrollTop(scrollNode.scrollTop + delta);
+        this._saveScrollState();
+    },
 
-        // default to the middle
-        if (pixelOffset === undefined) {
-            pixelOffset = scrollNode.clientHeight / 2;
+    /**
+     * Scroll up/down in response to a scroll key
+     */
+    handleScrollKey: function(ev) {
+        switch (ev.keyCode) {
+            case KeyCode.PAGE_UP:
+                this.scrollRelative(-1);
+                break;
+
+            case KeyCode.PAGE_DOWN:
+                this.scrollRelative(1);
+                break;
+
+            case KeyCode.HOME:
+                if (ev.ctrlKey) {
+                    this.scrollToTop();
+                }
+                break;
+
+            case KeyCode.END:
+                if (ev.ctrlKey) {
+                    this.scrollToBottom();
+                }
+                break;
         }
+    },
+
+    /* Scroll the panel to bring the DOM node with the scroll token
+     * `scrollToken` into view.
+     *
+     * offsetBase gives the reference point for the pixelOffset. 0 means the
+     * top of the container, 1 means the bottom, and fractional values mean
+     * somewhere in the middle. If omitted, it defaults to 0.
+     *
+     * pixelOffset gives the number of pixels *above* the offsetBase that the
+     * node (specifically, the bottom of it) will be positioned. If omitted, it
+     * defaults to 0.
+     */
+    scrollToToken: function(scrollToken, pixelOffset, offsetBase) {
+        pixelOffset = pixelOffset || 0;
+        offsetBase = offsetBase || 0;
+
+        // convert pixelOffset so that it is based on the bottom of the
+        // container.
+        pixelOffset += this._getScrollNode().clientHeight * (1-offsetBase);
 
         // save the desired scroll state. It's important we do this here rather
         // than as a result of the scroll event, because (a) we might not *get*
@@ -371,17 +445,14 @@ module.exports = React.createClass({
         var wrapperRect = ReactDOM.findDOMNode(this).getBoundingClientRect();
         var boundingRect = node.getBoundingClientRect();
         var scrollDelta = boundingRect.bottom + pixelOffset - wrapperRect.bottom;
-        if(scrollDelta != 0) {
-            scrollNode.scrollTop += scrollDelta;
 
-            // see the comments in onMessageListScroll regarding recentEventScroll
-            this.recentEventScroll = scrollNode.scrollTop;
+        debuglog("Scrolling to token '" + node.dataset.scrollToken + "'+" +
+                 pixelOffset + " (delta: "+scrollDelta+")");
+
+        if(scrollDelta != 0) {
+            this._setScrollTop(scrollNode.scrollTop + scrollDelta);
         }
 
-        debuglog("Scrolled to token", node.dataset.scrollToken, "+",
-                 pixelOffset+":", scrollNode.scrollTop, 
-                 "(delta: "+scrollDelta+")");
-        debuglog("recentEventScroll now "+this.recentEventScroll);
     },
 
     _saveScrollState: function() {
@@ -419,15 +490,36 @@ module.exports = React.createClass({
         var scrollNode = this._getScrollNode();
 
         if (scrollState.stuckAtBottom) {
-            scrollNode.scrollTop = scrollNode.scrollHeight;
-            debuglog("Scrolled to bottom; offset now", scrollNode.scrollTop);
+            this._setScrollTop(Number.MAX_VALUE);
         } else if (scrollState.trackedScrollToken) {
             this._scrollToToken(scrollState.trackedScrollToken,
                                scrollState.pixelOffset);
         }
-        this._lastSetScroll = scrollNode.scrollTop;
     },
 
+    _setScrollTop: function(scrollTop) {
+        var scrollNode = this._getScrollNode();
+
+        var prevScroll = scrollNode.scrollTop;
+
+        // FF ignores attempts to set scrollTop to very large numbers
+        scrollNode.scrollTop = Math.min(scrollTop, scrollNode.scrollHeight);
+
+        // If this change generates a scroll event, we should not update the
+        // saved scroll state on it. See the comments in onScroll.
+        //
+        // If we *don't* expect a scroll event, we need to leave _lastSetScroll
+        // alone, otherwise we'll end up ignoring a future scroll event which is
+        // nothing to do with this change.
+
+        if (scrollNode.scrollTop != prevScroll) {
+            this._lastSetScroll = scrollNode.scrollTop;
+        }
+
+        debuglog("Set scrollTop:", scrollNode.scrollTop,
+                 "requested:", scrollTop,
+                 "_lastSetScroll:", this._lastSetScroll);
+    },
 
     /* get the DOM node which has the scrollTop property we care about for our
      * message panel.
@@ -439,24 +531,15 @@ module.exports = React.createClass({
             throw new Error("ScrollPanel._getScrollNode called when unmounted");
         }
 
-        var panel = ReactDOM.findDOMNode(this.refs.geminiPanel);
-
-        // If the gemini scrollbar is doing its thing, this will be a div within
-        // the message panel (ie, the gemini container); otherwise it will be the
-        // message panel itself.
-
-        if (panel.classList.contains('gm-prevented')) {
-            return panel;
-        } else {
-            return panel.children[2]; // XXX: Fragile!
-        }
+        return this.refs.geminiPanel.scrollbar.getViewElement();
     },
 
     render: function() {
         // TODO: the classnames on the div and ol could do with being updated to
         // reflect the fact that we don't necessarily contain a list of messages.
         // it's not obvious why we have a separate div and ol anyway.
-        return (<GeminiScrollbar autoshow={true} ref="geminiPanel" onScroll={ this.onScroll }
+        return (<GeminiScrollbar autoshow={true} ref="geminiPanel"
+                onScroll={this.onScroll} onResize={this.onResize}
                 className={this.props.className} style={this.props.style}>
                     <div className="mx_RoomView_messageListWrapper">
                         <ol ref="itemlist" className="mx_RoomView_MessageList" aria-live="polite">

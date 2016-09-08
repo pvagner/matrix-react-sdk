@@ -34,7 +34,7 @@ module.exports = React.createClass({
         }
         if (fullWidth < thumbWidth && fullHeight < thumbHeight) {
             // no scaling needs to be applied
-            return fullHeight;
+            return 1;
         }
         var widthMulti = thumbWidth / fullWidth;
         var heightMulti = thumbHeight / fullHeight;
@@ -72,7 +72,7 @@ module.exports = React.createClass({
         return (
             <span className="mx_MVideoBody">
                 <video className="mx_MVideoBody" src={cli.mxcUrlToHttp(content.url)} alt={content.body}
-                    controls preload={preload} autoPlay="0"
+                    controls preload={preload} autoPlay={false}
                     height={height} width={width} poster={poster}>
                 </video>
             </span>

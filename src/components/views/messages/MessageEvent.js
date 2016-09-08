@@ -22,32 +22,53 @@ var sdk = require('../../../index');
 module.exports = React.createClass({
     displayName: 'MessageEvent',
 
-    statics: {
-        needsSenderProfile: function() {
-            return true;
-        }
+    propTypes: {
+        /* the MatrixEvent to show */
+        mxEvent: React.PropTypes.object.isRequired,
+
+        /* a list of words to highlight */
+        highlights: React.PropTypes.array,
+
+        /* link URL for the highlights */
+        highlightLink: React.PropTypes.string,
+
+        /* should show URL previews for this event */
+        showUrlPreview: React.PropTypes.bool,
+
+        /* callback called when dynamic content in events are loaded */
+        onWidgetLoad: React.PropTypes.func,
+    },
+
+    getEventTileOps: function() {
+        return this.refs.body && this.refs.body.getEventTileOps ? this.refs.body.getEventTileOps() : null;
     },
 
     render: function() {
-        var UnknownMessageTile = sdk.getComponent('messages.UnknownBody');
+        var UnknownBody = sdk.getComponent('messages.UnknownBody');
 
-        var tileTypes = {
+        var bodyTypes = {
             'm.text': sdk.getComponent('messages.TextualBody'),
             'm.notice': sdk.getComponent('messages.TextualBody'),
             'm.emote': sdk.getComponent('messages.TextualBody'),
             'm.image': sdk.getComponent('messages.MImageBody'),
             'm.file': sdk.getComponent('messages.MFileBody'),
+            'm.audio': sdk.getComponent('messages.MAudioBody'),
             'm.video': sdk.getComponent('messages.MVideoBody')
         };
 
         var content = this.props.mxEvent.getContent();
         var msgtype = content.msgtype;
-        var TileType = UnknownMessageTile;
-        if (msgtype && tileTypes[msgtype]) {
-            TileType = tileTypes[msgtype];
+        var BodyType = UnknownBody;
+        if (msgtype && bodyTypes[msgtype]) {
+            BodyType = bodyTypes[msgtype];
+        } else if (content.url) {
+            // Fallback to MFileBody if there's a content URL
+            BodyType = bodyTypes['m.file'];
         }
 
-        return <TileType mxEvent={this.props.mxEvent} highlights={this.props.highlights} 
-                    onHighlightClick={this.props.onHighlightClick} />;
+        return <BodyType ref="body" mxEvent={this.props.mxEvent} highlights={this.props.highlights}
+                    highlightLink={this.props.highlightLink}
+                    showUrlPreview={this.props.showUrlPreview}
+                    onWidgetLoad={this.props.onWidgetLoad} />;
     },
 });

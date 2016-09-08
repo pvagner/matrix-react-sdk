@@ -20,6 +20,7 @@ var React = require('react');
 var filesize = require('filesize');
 
 var MatrixClientPeg = require('../../../MatrixClientPeg');
+var ImageUtils = require('../../../ImageUtils');
 var Modal = require('../../../Modal');
 var sdk = require('../../../index');
 var dis = require("../../../dispatcher");
@@ -27,26 +28,9 @@ var dis = require("../../../dispatcher");
 module.exports = React.createClass({
     displayName: 'MImageBody',
 
-    thumbHeight: function(fullWidth, fullHeight, thumbWidth, thumbHeight) {
-        if (!fullWidth || !fullHeight) {
-            // Cannot calculate thumbnail height for image: missing w/h in metadata. We can't even
-            // log this because it's spammy
-            return undefined;
-        }
-        if (fullWidth < thumbWidth && fullHeight < thumbHeight) {
-            // no scaling needs to be applied
-            return fullHeight;
-        }
-        var widthMulti = thumbWidth / fullWidth;
-        var heightMulti = thumbHeight / fullHeight;
-        if (widthMulti < heightMulti) {
-            // width is the dominant dimension so scaling will be fixed on that
-            return Math.floor(widthMulti * fullHeight);
-        }
-        else {
-            // height is the dominant dimension so scaling will be fixed on that
-            return Math.floor(heightMulti * fullHeight);
-        }
+    propTypes: {
+        /* the MatrixEvent to show */
+        mxEvent: React.PropTypes.object.isRequired,
     },
 
     onClick: function onClick(ev) {
@@ -63,6 +47,7 @@ module.exports = React.createClass({
             if (content.info) {
                 params.width = content.info.w;
                 params.height = content.info.h;
+                params.fileSize = content.info.size;
             }
 
             Modal.createDialog(ImageView, params, "mx_Dialog_lightbox");
@@ -94,7 +79,43 @@ module.exports = React.createClass({
 
     _getThumbUrl: function() {
         var content = this.props.mxEvent.getContent();
-        return MatrixClientPeg.get().mxcUrlToHttp(content.url, 480, 360);
+        return MatrixClientPeg.get().mxcUrlToHttp(content.url, 800, 600);
+    },
+
+    componentDidMount: function() {
+        this.dispatcherRef = dis.register(this.onAction);
+        this.fixupHeight();
+    },
+
+    componentWillUnmount: function() {
+        dis.unregister(this.dispatcherRef);
+    },
+
+    onAction: function(payload) {
+        if (payload.action === "timeline_resize") {
+            this.fixupHeight();
+        }
+    },
+
+    fixupHeight: function() {
+        if (!this.refs.image) {
+            console.warn("Refusing to fix up height on MImageBody with no image element");
+            return;
+        }
+
+        var content = this.props.mxEvent.getContent();
+
+        var thumbHeight = null;
+        var timelineWidth = this.refs.body.offsetWidth;
+        var maxHeight = 600; // let images take up as much width as they can so long as the height doesn't exceed 600px.
+        // the alternative here would be 600*timelineWidth/800; to scale them down to fit inside a 4:3 bounding box
+
+        //console.log("trying to fit image into timelineWidth of " + this.refs.body.offsetWidth + " or " + this.refs.body.clientWidth);
+        if (content.info) {
+            thumbHeight = ImageUtils.thumbHeight(content.info.w, content.info.h, timelineWidth, maxHeight);
+        }
+        this.refs.image.style.height = thumbHeight + "px";
+        // console.log("Image height now", thumbHeight);
     },
 
     render: function() {
@@ -102,24 +123,18 @@ module.exports = React.createClass({
         var content = this.props.mxEvent.getContent();
         var cli = MatrixClientPeg.get();
 
-        var thumbHeight = null;
-        if (content.info) thumbHeight = this.thumbHeight(content.info.w, content.info.h, 480, 360);
-
-        var imgStyle = {};
-        if (thumbHeight) imgStyle['height'] = thumbHeight;
-
         var thumbUrl = this._getThumbUrl();
         if (thumbUrl) {
             return (
-                <span className="mx_MImageBody">
+                <span className="mx_MImageBody" ref="body">
                     <a href={cli.mxcUrlToHttp(content.url)} onClick={ this.onClick }>
-                        <img className="mx_MImageBody_thumbnail" src={thumbUrl}
-                            alt={content.body} style={imgStyle}
+                        <img className="mx_MImageBody_thumbnail" src={thumbUrl} ref="image"
+                            alt={content.body}
                             onMouseEnter={this.onImageEnter}
                             onMouseLeave={this.onImageLeave} />
                     </a>
                     <div className="mx_MImageBody_download">
-                        <a href={cli.mxcUrlToHttp(content.url)} target="_blank">
+                        <a href={cli.mxcUrlToHttp(content.url)} target="_blank" rel="noopener">
                             <TintableSvg src="img/download.svg" width="12" height="14"/>
                             Download {content.body} ({ content.info && content.info.size ? filesize(content.info.size) : "Unknown size" })
                         </a>

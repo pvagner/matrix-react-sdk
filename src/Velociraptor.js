@@ -1,6 +1,6 @@
 var React = require('react');
 var ReactDom = require('react-dom');
-var Velocity = require('velocity-animate');
+var Velocity = require('velocity-vector');
 
 /**
  * The Velociraptor contains components and animates transitions with velocity.
@@ -13,25 +13,43 @@ module.exports = React.createClass({
     displayName: 'Velociraptor',
 
     propTypes: {
-        children: React.PropTypes.array,
+        // either a list of child nodes, or a single child.
+        children: React.PropTypes.any,
+
+        // optional transition information for changing existing children
         transition: React.PropTypes.object,
-        container: React.PropTypes.string
+
+        // a list of state objects to apply to each child node in turn
+        startStyles: React.PropTypes.array,
+
+        // a list of transition options from the corresponding startStyle
+        enterTransitionOpts: React.PropTypes.array,
+    },
+
+    getDefaultProps: function() {
+        return {
+            startStyles: [],
+            enterTransitionOpts: [],
+        };
     },
 
     componentWillMount: function() {
-        this.children = {};
         this.nodes = {};
-        var self = this;
-        React.Children.map(this.props.children, function(c) {
-            self.children[c.key] = c;
-        });
+        this._updateChildren(this.props.children);
     },
 
     componentWillReceiveProps: function(nextProps) {
+        this._updateChildren(nextProps.children);
+    },
+
+    /**
+     * update `this.children` according to the new list of children given
+     */
+    _updateChildren: function(newChildren) {
         var self = this;
-        var oldChildren = this.children;
+        var oldChildren = this.children || {};
         this.children = {};
-        React.Children.map(nextProps.children, function(c) {
+        React.Children.toArray(newChildren).forEach(function(c) {
             if (oldChildren[c.key]) {
                 var old = oldChildren[c.key];
                 var oldNode = ReactDom.findDOMNode(self.nodes[old.key]);
@@ -51,63 +69,92 @@ module.exports = React.createClass({
                 }
                 self.children[c.key] = old;
             } else {
-                // new element. If it has a startStyle, use that as the style and go through
+                // new element. If we have a startStyle, use that as the style and go through
                 // the enter animations
-                var newProps = {
-                    ref: self.collectNode.bind(self, c.key)
-                };
-                if (c.props.startStyle && Object.keys(c.props.startStyle).length) {
-                    var startStyle = c.props.startStyle;
-                    if (Array.isArray(startStyle)) {
-                        startStyle = startStyle[0];
-                    }
-                    newProps._restingStyle = c.props.style;
+                var newProps = {};
+                var restingStyle = c.props.style;
+
+                var startStyles = self.props.startStyles;
+                if (startStyles.length > 0) {
+                    var startStyle = startStyles[0]
                     newProps.style = startStyle;
-                    //console.log("mounted@startstyle0: "+JSON.stringify(startStyle));
-                    // apply the enter animations once it's mounted
+                    // console.log("mounted@startstyle0: "+JSON.stringify(startStyle));
                 }
+
+                newProps.ref = (n => self._collectNode(
+                    c.key, n, restingStyle
+                ));
+
                 self.children[c.key] = React.cloneElement(c, newProps);
             }
         });
     },
 
-    collectNode: function(k, node) {
+    /**
+     * called when a child element is mounted/unmounted
+     *
+     * @param {string}     k              key of the child
+     * @param {null|Object} node          On mount: React node. On unmount: null
+     * @param {Object}     restingStyle   final style
+     */
+    _collectNode: function(k, node, restingStyle) {
         if (
             node &&
             this.nodes[k] === undefined &&
-            node.props.startStyle &&
-            Object.keys(node.props.startStyle).length
+            this.props.startStyles.length > 0
         ) {
+            var startStyles = this.props.startStyles;
+            var transitionOpts = this.props.enterTransitionOpts;
             var domNode = ReactDom.findDOMNode(node);
-            var startStyles = node.props.startStyle;
-            var transitionOpts = node.props.enterTransitionOpts;
-            if (!Array.isArray(startStyles)) {
-                startStyles = [ startStyles ];
-                transitionOpts = [ transitionOpts ];
-            }
             // start from startStyle 1: 0 is the one we gave it
             // to start with, so now we animate 1 etc.
             for (var i = 1; i < startStyles.length; ++i) {
                 Velocity(domNode, startStyles[i], transitionOpts[i-1]);
-                //console.log("start: "+JSON.stringify(startStyles[i]));
+                /*
+                console.log("start:",
+                            JSON.stringify(transitionOpts[i-1]),
+                            "->",
+                            JSON.stringify(startStyles[i]),
+                            );
+                */
             }
+
             // and then we animate to the resting state
-            Velocity(domNode, node.props._restingStyle, transitionOpts[i-1]);
-            //console.log("enter: "+JSON.stringify(node.props._restingStyle));
+            Velocity(domNode, restingStyle,
+                     transitionOpts[i-1])
+            .then(() => {
+                // once we've reached the resting state, hide the element if
+                // appropriate
+                domNode.style.visibility = restingStyle.visibility;
+            });
+
+            /*
+            console.log("enter:",
+                        JSON.stringify(transitionOpts[i-1]),
+                        "->",
+                        JSON.stringify(restingStyle));
+            */
+        } else if (node === null) {
+            // Velocity stores data on elements using the jQuery .data()
+            // method, and assumes you'll be using jQuery's .remove() to
+            // remove the element, but we don't use jQuery, so we need to
+            // blow away the element's data explicitly otherwise it will leak.
+            // This uses Velocity's internal jQuery compatible wrapper.
+            // See the bug at
+            // https://github.com/julianshapiro/velocity/issues/300
+            // and the FAQ entry, "Preventing memory leaks when
+            // creating/destroying large numbers of elements"
+            // (https://github.com/julianshapiro/velocity/issues/47)
+            var domNode = ReactDom.findDOMNode(this.nodes[k]);
+            Velocity.Utilities.removeData(domNode);
         }
         this.nodes[k] = node;
     },
 
     render: function() {
-        var self = this;
-        var childList = Object.keys(this.children).map(function(k) {
-            return React.cloneElement(self.children[k], {
-                ref: self.collectNode.bind(self, self.children[k].key)
-            });
-        });
         return (
             <span>
-                {childList}
+                {Object.values(this.children)}
             </span>
         );
     },

@@ -17,10 +17,10 @@ limitations under the License.
 'use strict';
 
 var React = require('react');
-var Velocity = require('velocity-animate');
-require('velocity-ui-pack');
+var UiEffects = require('../../../UiEffects');
 var sdk = require('../../../index');
 var Email = require('../../../email');
+var Modal = require("../../../Modal");
 
 var FIELD_EMAIL = 'field_email';
 var FIELD_USERNAME = 'field_username';
@@ -34,11 +34,18 @@ module.exports = React.createClass({
     displayName: 'RegistrationForm',
 
     propTypes: {
+        // Values pre-filled in the input boxes when the component loads
         defaultEmail: React.PropTypes.string,
         defaultUsername: React.PropTypes.string,
+        defaultPassword: React.PropTypes.string,
+
+        // A username that will be used if no username is entered.
+        // Specifying this param will also warn the user that entering
+        // a different username will cause a fresh account to be generated.
+        guestUsername: React.PropTypes.string,
+
         showEmail: React.PropTypes.bool,
         minPasswordLength: React.PropTypes.number,
-        disableUsernameChanges: React.PropTypes.bool,
         onError: React.PropTypes.func,
         onRegisterClick: React.PropTypes.func // onRegisterClick(Object) => ?Promise
     },
@@ -55,10 +62,6 @@ module.exports = React.createClass({
 
     getInitialState: function() {
         return {
-            email: this.props.defaultEmail,
-            username: this.props.defaultUsername,
-            password: null,
-            passwordConfirm: null,
             fieldValid: {}
         };
     },
@@ -76,19 +79,43 @@ module.exports = React.createClass({
         this.validateField(FIELD_USERNAME);
         this.validateField(FIELD_EMAIL);
 
+        var self = this;
         if (this.allFieldsValid()) {
-            var promise = this.props.onRegisterClick({
-                username: this.refs.username.value.trim(),
-                password: this.refs.password.value.trim(),
-                email: this.refs.email.value.trim()
-            });
-
-            if (promise) {
-                ev.target.disabled = true;
-                promise.finally(function() {
-                    ev.target.disabled = false;
+            if (this.refs.email.value == '') {
+                var QuestionDialog = sdk.getComponent("dialogs.QuestionDialog");
+                Modal.createDialog(QuestionDialog, {
+                    title: "Warning",
+                    description:
+                        <div>
+                            If you don't specify an email address, you won't be able to reset your password.<br/>
+                            Are you sure?
+                        </div>,
+                    button: "Continue",
+                    onFinished: function(confirmed) {
+                        if (confirmed) {
+                            self._doSubmit();
+                        }
+                    },
                 });
             }
+            else {
+                self._doSubmit();
+            }
+        }
+    },
+
+    _doSubmit: function() {
+        var promise = this.props.onRegisterClick({
+            username: this.refs.username.value.trim() || this.props.guestUsername,
+            password: this.refs.password.value.trim(),
+            email: this.refs.email.value.trim()
+        });
+
+        if (promise) {
+            ev.target.disabled = true;
+            promise.finally(function() {
+                ev.target.disabled = false;
+            });
         }
     },
 
@@ -120,13 +147,14 @@ module.exports = React.createClass({
                 break;
             case FIELD_USERNAME:
                 // XXX: SPEC-1
-                if (encodeURIComponent(this.refs.username.value) != this.refs.username.value) {
+                var username = this.refs.username.value.trim() || this.props.guestUsername;
+                if (encodeURIComponent(username) != username) {
                     this.markFieldValid(
                         field_id,
                         false,
                         "RegistrationForm.ERR_USERNAME_INVALID"
                     );
-                } else if (this.refs.username.value == '') {
+                } else if (username == '') {
                     this.markFieldValid(
                         field_id,
                         false,
@@ -167,7 +195,7 @@ module.exports = React.createClass({
         fieldValid[field_id] = val;
         this.setState({fieldValid: fieldValid});
         if (!val) {
-            Velocity(this.fieldElementById(field_id), "callout.shake", 300);
+            UiEffects.field_input_incorrect(this.fieldElementById(field_id));
             this.props.onError(error_code);
         }
     },
@@ -185,12 +213,13 @@ module.exports = React.createClass({
         }
     },
 
-    _styleField: function(field_id, baseStyle) {
-        var style = baseStyle || {};
+    _classForField: function(field_id, baseClass) {
+        let cls = baseClass || '';
         if (this.state.fieldValid[field_id] === false) {
-            style['borderColor'] = 'red';
+            if (cls) cls += ' ';
+            cls += 'error';
         }
-        return style;
+        return cls;
     },
 
     render: function() {
@@ -198,10 +227,10 @@ module.exports = React.createClass({
         var emailSection, registerButton;
         if (this.props.showEmail) {
             emailSection = (
-                <input className="mx_Login_field" type="text" ref="email"
-                    autoFocus={true} placeholder="Email address"
-                    defaultValue={this.state.email}
-                    style={this._styleField(FIELD_EMAIL)}
+                <input type="text" ref="email"
+                    autoFocus={true} placeholder="Email address (optional)"
+                    defaultValue={this.props.defaultEmail}
+                    className={this._classForField(FIELD_EMAIL, 'mx_Login_field')}
                     onBlur={function() {self.validateField(FIELD_EMAIL)}} />
             );
         }
@@ -211,27 +240,34 @@ module.exports = React.createClass({
             );
         }
 
+        var placeholderUserName = "User name";
+        if (this.props.guestUsername) {
+            placeholderUserName += " (default: " + this.props.guestUsername + ")"
+        }
+
         return (
             <div>
                 <form onSubmit={this.onSubmit}>
                     {emailSection}
                     <br />
-                    <input className="mx_Login_field" type="text" ref="username"
-                        placeholder="User name" defaultValue={this.state.username}
-                        style={this._styleField(FIELD_USERNAME)}
-                        onBlur={function() {self.validateField(FIELD_USERNAME)}}
-                        disabled={this.props.disableUsernameChanges} />
+                    <input type="text" ref="username"
+                        placeholder={ placeholderUserName } defaultValue={this.props.defaultUsername}
+                        className={this._classForField(FIELD_USERNAME, 'mx_Login_field')}
+                        onBlur={function() {self.validateField(FIELD_USERNAME)}} />
                     <br />
-                    <input className="mx_Login_field" type="password" ref="password"
-                        style={this._styleField(FIELD_PASSWORD)}
+                    { this.props.guestUsername ?
+                        <div className="mx_Login_fieldLabel">Setting a user name will create a fresh account</div> : null
+                    }
+                    <input type="password" ref="password"
+                        className={this._classForField(FIELD_PASSWORD, 'mx_Login_field')}
                         onBlur={function() {self.validateField(FIELD_PASSWORD)}}
-                        placeholder="Password" defaultValue={this.state.password} />
+                        placeholder="Password" defaultValue={this.props.defaultPassword} />
                     <br />
-                    <input className="mx_Login_field" type="password" ref="passwordConfirm"
+                    <input type="password" ref="passwordConfirm"
                         placeholder="Confirm password"
-                        style={this._styleField(FIELD_PASSWORD_CONFIRM)}
+                        className={this._classForField(FIELD_PASSWORD_CONFIRM, 'mx_Login_field')}
                         onBlur={function() {self.validateField(FIELD_PASSWORD_CONFIRM)}}
-                        defaultValue={this.state.passwordConfirm} />
+                        defaultValue={this.props.defaultPassword} />
                     <br />
                     {registerButton}
                 </form>

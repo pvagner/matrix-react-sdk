@@ -13,10 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-var React = require('react');
-var sdk = require("../../../index");
-var Entities = require("../../../Entities");
-var MatrixClientPeg = require("../../../MatrixClientPeg");
+import React from 'react';
+import sdk from '../../../index';
+import Entities from '../../../Entities';
+import MatrixClientPeg from '../../../MatrixClientPeg';
+import rate_limited_func from '../../../ratelimitedfunc';
 
 const INITIAL_SEARCH_RESULTS_COUNT = 10;
 
@@ -26,6 +27,7 @@ module.exports = React.createClass({
     propTypes: {
         roomId: React.PropTypes.string.isRequired,
         onInvite: React.PropTypes.func.isRequired, // fn(inputText)
+        onThirdPartyInvite: React.PropTypes.func.isRequired, // fn(inputText)
         onSearchQueryChanged: React.PropTypes.func // fn(inputText)
     },
 
@@ -36,21 +38,51 @@ module.exports = React.createClass({
     },
 
     componentWillMount: function() {
-        this._room = MatrixClientPeg.get().getRoom(this.props.roomId);
+        var cli = MatrixClientPeg.get();
+        cli.on("RoomState.members", this.onRoomStateMember);
+
         this._emailEntity = null;
+
+        // we have to update the list whenever membership changes
+        // particularly to avoid bug https://github.com/vector-im/vector-web/issues/1813
+        this._updateList();
+    },
+
+    componentDidMount: function() {
+        // initialise the email tile
+        this.onSearchQueryChanged('');
+    },
+
+    componentWillUnmount: function() {
+        var cli = MatrixClientPeg.get();
+        if (cli) {
+            cli.removeListener("RoomState.members", this.onRoomStateMember);
+        }
+        // cancel any pending calls to the rate_limited_funcs
+        this._updateList.cancelPendingCall();
+    },
+
+    _updateList: new rate_limited_func(function() {
+        this._room = MatrixClientPeg.get().getRoom(this.props.roomId);
         // Load the complete user list for inviting new users
-        // TODO: Keep this list bleeding-edge up-to-date. Practically speaking,
-        // it will do for now not being updated as random new users join different
-        // rooms as this list will be reloaded every room swap.
         if (this._room) {
             this._userList = MatrixClientPeg.get().getUsers().filter((u) => {
-                return !this._room.hasMembershipState(u.userId, "join");
+                return (!this._room.hasMembershipState(u.userId, "join") &&
+                        !this._room.hasMembershipState(u.userId, "invite"));
             });
         }
+    }, 500),
+
+    onRoomStateMember: function(ev, state, member) {
+        this._updateList();
     },
 
     onInvite: function(ev) {
         this.props.onInvite(this._input);
+    },
+
+    onThirdPartyInvite: function(ev) {
+        this.props.onThirdPartyInvite(this._input);
     },
 
     onSearchQueryChanged: function(input) {
@@ -68,9 +100,10 @@ module.exports = React.createClass({
 
         this._emailEntity = new Entities.newEntity(
             <EntityTile key="dynamic_invite_tile" suppressOnHover={true} showInviteButton={true}
-            avatarJsx={ <BaseAvatar name="@" width={36} height={36} /> }
-            className="mx_EntityTile_invitePlaceholder"
-            presenceState="online" onClick={this.onInvite} name={label} />,
+                avatarJsx={ <BaseAvatar name="@" width={36} height={36} /> }
+                className="mx_EntityTile_invitePlaceholder"
+                presenceState="online" onClick={this.onThirdPartyInvite} name={"Invite by email"}
+            />,
             function(query) {
                 return true; // always show this
             }
@@ -89,7 +122,7 @@ module.exports = React.createClass({
         }
 
         return (
-            <SearchableEntityList searchPlaceholderText={"Invite / Search"}
+            <SearchableEntityList searchPlaceholderText={"Search/invite by name, email, id"}
                 onSubmit={this.props.onInvite}
                 onQueryChanged={this.onSearchQueryChanged}
                 entities={entities}

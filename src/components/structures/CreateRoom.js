@@ -24,7 +24,6 @@ var PresetValues = {
     Custom: "custom",
 };
 var q = require('q');
-var encryption = require("../../encryption");
 var sdk = require('../../index');
 
 module.exports = React.createClass({
@@ -108,17 +107,8 @@ module.exports = React.createClass({
 
         var deferred = cli.createRoom(options);
 
-        var response;
-
         if (this.state.encrypt) {
-            deferred = deferred.then(function(res) {
-                response = res;
-                return encryption.enableEncryption(
-                    cli, response.room_id, options.invite
-                );
-            }).then(function() {
-                return q(response) }
-            );
+            // TODO
         }
 
         this.setState({
@@ -249,13 +239,13 @@ module.exports = React.createClass({
             var RoomAlias = sdk.getComponent("create_room.RoomAlias");
             var Presets = sdk.getComponent("create_room.Presets");
             var UserSelector = sdk.getComponent("elements.UserSelector");
-            var RoomHeader = sdk.getComponent("rooms.RoomHeader");
+            var SimpleRoomHeader = sdk.getComponent("rooms.SimpleRoomHeader");
 
             var domain = MatrixClientPeg.get().getDomain();
 
             return (
             <div className="mx_CreateRoom">
-                <RoomHeader simpleHeader="Create room" />
+                <SimpleRoomHeader title="CreateRoom" />
                 <div className="mx_CreateRoom_body">
                     <input type="text" ref="room_name" value={this.state.room_name} onChange={this.onNameChange} placeholder="Name"/> <br />
                     <textarea className="mx_CreateRoom_description" ref="topic" value={this.state.topic} onChange={this.onTopicChange} placeholder="Topic"/> <br />

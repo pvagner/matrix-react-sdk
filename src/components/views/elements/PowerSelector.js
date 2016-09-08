@@ -34,6 +34,15 @@ module.exports = React.createClass({
 
     propTypes: {
         value: React.PropTypes.number.isRequired,
+
+        // if true, the <select/> should be a 'controlled' form element and updated by React
+        // to reflect the current value, rather than left freeform.
+        // MemberInfo uses controlled; RoomSettings uses non-controlled.
+        //
+        // ignored if disabled is truthy. false by default.
+        controlled: React.PropTypes.bool,
+
+        // should the user be able to change the value? false by default.
         disabled: React.PropTypes.bool,
         onChange: React.PropTypes.func,
     },
@@ -45,8 +54,10 @@ module.exports = React.createClass({
     },
 
     onSelectChange: function(event) {
-        this.state.custom = (event.target.value === "Custom");
-        this.props.onChange(this.getValue());
+        this.setState({ custom: event.target.value === "Custom" });
+        if (event.target.value !== "Custom") {
+            this.props.onChange(this.getValue());
+        }
     },
 
     onCustomBlur: function(event) {
@@ -83,14 +94,23 @@ module.exports = React.createClass({
             customPicker = <span> of { input }</span>;
         }
 
-        var selectValue = roles[this.props.value] || "Custom";
+        var selectValue;
+        if (this.state.custom) {
+            selectValue = "Custom";
+        }
+        else {
+            selectValue = roles[this.props.value] || "Custom";
+        }
         var select;
         if (this.props.disabled) {
             select = <span>{ selectValue }</span>;
         }
         else {
             select =
-                <select ref="select" defaultValue={ selectValue } onChange={ this.onSelectChange }>
+                <select ref="select"
+                        value={ this.props.controlled ? selectValue : undefined }
+                        defaultValue={ !this.props.controlled ? selectValue : undefined }
+                        onChange={ this.onSelectChange }>
                     <option value="User">User (0)</option>
                     <option value="Moderator">Moderator (50)</option>
                     <option value="Admin">Admin (100)</option>

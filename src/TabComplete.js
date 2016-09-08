@@ -13,7 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-var Entry = require("./TabCompleteEntries").Entry;
+
+import { Entry, MemberEntry, CommandEntry } from './TabCompleteEntries';
+import SlashCommands from './SlashCommands';
+import MatrixClientPeg from './MatrixClientPeg';
 
 const DELAY_TIME_MS = 1000;
 const KEY_TAB = 9;
@@ -24,10 +27,10 @@ const KEY_WINDOWS = 91;
 //
 // Capturing group containing the start
 // of line or a whitespace char
-//     \_______________       __________Capturing group of 1 or more non-whitespace chars
+//     \_______________       __________Capturing group of 0 or more non-whitespace chars
 //                    _|__  _|_         followed by the end of line
 //                   /    \/   \
-const MATCH_REGEX = /(^|\s)(\S+)$/;
+const MATCH_REGEX = /(^|\s)(\S*)$/;
 
 class TabComplete {
 
@@ -45,21 +48,37 @@ class TabComplete {
         this.isFirstWord = false; // true if you tab-complete on the first word
         this.enterTabCompleteTimerId = null;
         this.inPassiveMode = false;
+
+        // Map tracking ordering of the room members.
+        // userId: integer, highest comes first.
+        this.memberTabOrder = {};
+
+        // monotonically increasing counter used for tracking ordering of members
+        this.memberOrderSeq = 0;
     }
 
     /**
-     * @param {Entry[]} completeList
+     * Call this when a a UI element representing a tab complete entry has been clicked
+     * @param {entry} The entry that was clicked
      */
-    setCompletionList(completeList) {
-        this.list = completeList;
+    onEntryClick(entry) {
         if (this.opts.onClickCompletes) {
-            // assign onClick listeners for each entry to complete the text
-            this.list.forEach((l) => {
-                l.onClick = () => {
-                    this.completeTo(l);
-                }
-            });
+            this.completeTo(entry);
         }
+    }
+
+    loadEntries(room) {
+        this._makeEntries(room);
+        this._initSorting(room);
+        this._sortEntries();
+    }
+
+    onMemberSpoke(member) {
+        if (this.memberTabOrder[member.userId] === undefined) {
+            this.list.push(new MemberEntry(member));
+        }
+        this.memberTabOrder[member.userId] = this.memberOrderSeq++;
+        this._sortEntries();
     }
 
     /**
@@ -83,10 +102,39 @@ class TabComplete {
         this._notifyStateChange();
     }
 
-    startTabCompleting() {
+    startTabCompleting(passive) {
+        this.originalText = this.textArea.value; // cache starting text
+
+        // grab the partial word from the text which we'll be tab-completing
+        var res = MATCH_REGEX.exec(this.originalText);
+        if (!res) {
+            this.matchedList = [];
+            return;
+        }
+        // ES6 destructuring; ignore first element (the complete match)
+        var [ , boundaryGroup, partialGroup] = res;
+
+        if (partialGroup.length === 0 && passive) {
+            return;
+        }
+
+        this.isFirstWord = partialGroup.length === this.originalText.length;
+
         this.completing = true;
         this.currentIndex = 0;
-        this._calculateCompletions();
+
+        this.matchedList = [
+            new Entry(partialGroup) // first entry is always the original partial
+        ];
+
+        // find matching entries in the set of entries given to us
+        this.list.forEach((entry) => {
+            if (entry.text.toLowerCase().indexOf(partialGroup.toLowerCase()) === 0) {
+                this.matchedList.push(entry);
+            }
+        });
+
+        // console.log("calculated completions => %s", JSON.stringify(this.matchedList));
     }
 
     /**
@@ -137,7 +185,7 @@ class TabComplete {
         this.inPassiveMode = passive;
 
         if (!this.completing) {
-            this.startTabCompleting();
+            this.startTabCompleting(passive);
         }
 
         if (shiftKey) {
@@ -189,6 +237,9 @@ class TabComplete {
 
             return;
         }
+
+        // ctrl-tab/alt-tab etc shouldn't trigger a complete
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
 
         // tab key has been pressed at this point
         this.handleTabPress(false, ev.shiftKey)
@@ -270,36 +321,57 @@ class TabComplete {
         });
     }
 
-    _calculateCompletions() {
-        this.originalText = this.textArea.value; // cache starting text
-
-        // grab the partial word from the text which we'll be tab-completing
-        var res = MATCH_REGEX.exec(this.originalText);
-        if (!res) {
-            this.matchedList = [];
-            return;
-        }
-        // ES6 destructuring; ignore first element (the complete match)
-        var [ , boundaryGroup, partialGroup] = res;
-        this.isFirstWord = partialGroup.length === this.originalText.length;
-
-        this.matchedList = [
-            new Entry(partialGroup) // first entry is always the original partial
-        ];
-
-        // find matching entries in the set of entries given to us
-        this.list.forEach((entry) => {
-            if (entry.text.toLowerCase().indexOf(partialGroup.toLowerCase()) === 0) {
-                this.matchedList.push(entry);
-            }
-        });
-
-        // console.log("_calculateCompletions => %s", JSON.stringify(this.matchedList));
-    }
-
     _notifyStateChange() {
         if (this.opts.onStateChange) {
             this.opts.onStateChange(this.completing);
+        }
+    }
+
+    _sortEntries() {
+        // largest comes first
+        const KIND_ORDER = {
+            command: 1,
+            member: 2,
+        };
+
+        this.list.sort((a, b) => {
+            const kindOrderDifference = KIND_ORDER[b.kind] - KIND_ORDER[a.kind];
+            if (kindOrderDifference != 0) {
+                return kindOrderDifference;
+            }
+
+            if (a.kind == 'member') {
+                let orderA = this.memberTabOrder[a.member.userId];
+                let orderB = this.memberTabOrder[b.member.userId];
+                if (orderA === undefined) orderA = -1;
+                if (orderB === undefined) orderB = -1;
+
+                return orderB - orderA;
+            }
+
+            // anything else we have no ordering for
+            return 0;
+        });
+    }
+
+    _makeEntries(room) {
+        const myUserId = MatrixClientPeg.get().credentials.userId;
+
+        const members = room.getJoinedMembers().filter(function(member) {
+            if (member.userId !== myUserId) return true;
+        });
+
+        this.list = MemberEntry.fromMemberList(members).concat(
+            CommandEntry.fromCommands(SlashCommands.getCommandList())
+        );
+    }
+
+    _initSorting(room) {
+        this.memberTabOrder = {};
+        this.memberOrderSeq = 0;
+
+        for (const ev of room.getLiveTimeline().getEvents()) {
+            this.memberTabOrder[ev.getSender()] = this.memberOrderSeq++;
         }
     }
 };

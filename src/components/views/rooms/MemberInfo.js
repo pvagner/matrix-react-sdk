@@ -30,9 +30,16 @@ var MatrixClientPeg = require("../../../MatrixClientPeg");
 var dis = require("../../../dispatcher");
 var Modal = require("../../../Modal");
 var sdk = require('../../../index');
+var UserSettingsStore = require('../../../UserSettingsStore');
+var createRoom = require('../../../createRoom');
 
 module.exports = React.createClass({
     displayName: 'MemberInfo',
+
+    propTypes: {
+        member: React.PropTypes.object.isRequired,
+        onFinished: React.PropTypes.func,
+    },
 
     getDefaultProps: function() {
         return {
@@ -40,24 +47,168 @@ module.exports = React.createClass({
         };
     },
 
-    componentDidMount: function() {
-        // work out the current state
-        if (this.props.member) {
-            var memberState = this._calculateOpsPermissions(this.props.member);
-            this.setState(memberState);
+    getInitialState: function() {
+        return {
+            can: {
+                kick: false,
+                ban: false,
+                mute: false,
+                modifyLevel: false
+            },
+            muted: false,
+            isTargetMod: false,
+            updating: 0,
+            devicesLoading: true,
+            devices: null,
+            existingOneToOneRoomId: null,
         }
     },
 
+    componentWillMount: function() {
+        this._cancelDeviceList = null;
+
+        // only display the devices list if our client supports E2E *and* the
+        // feature is enabled in the user settings
+        this._enableDevices = MatrixClientPeg.get().isCryptoEnabled() &&
+            UserSettingsStore.isFeatureEnabled("e2e_encryption");
+
+        this.setState({
+            existingOneToOneRoomId: this.getExistingOneToOneRoomId()
+        });
+    },
+
+    componentDidMount: function() {
+        this._updateStateForNewMember(this.props.member);
+        MatrixClientPeg.get().on("deviceVerificationChanged", this.onDeviceVerificationChanged);
+    },
+
     componentWillReceiveProps: function(newProps) {
-        var memberState = this._calculateOpsPermissions(newProps.member);
-        this.setState(memberState);
+        if (this.props.member.userId != newProps.member.userId) {
+            this._updateStateForNewMember(newProps.member);
+        }
+    },
+
+    componentWillUnmount: function() {
+        var client = MatrixClientPeg.get();
+        if (client) {
+            client.removeListener("deviceVerificationChanged", this.onDeviceVerificationChanged);
+        }
+        if (this._cancelDeviceList) {
+            this._cancelDeviceList();
+        }
+    },
+
+    getExistingOneToOneRoomId: function() {
+        const rooms = MatrixClientPeg.get().getRooms();
+        const userIds = [
+            this.props.member.userId,
+            MatrixClientPeg.get().credentials.userId
+        ];
+        let existingRoomId = null;
+        let invitedRoomId = null;
+
+        // roomId can be null here because of a hack in MatrixChat.onUserClick where we
+        // abuse this to view users rather than room members.
+        let currentMembers;
+        if (this.props.member.roomId) {
+            const currentRoom = MatrixClientPeg.get().getRoom(this.props.member.roomId);
+            currentMembers = currentRoom.getJoinedMembers();
+        }
+
+        // reuse the first private 1:1 we find
+        existingRoomId = null;
+
+        for (let i = 0; i < rooms.length; i++) {
+            // don't try to reuse public 1:1 rooms
+            const join_rules = rooms[i].currentState.getStateEvents("m.room.join_rules", '');
+            if (join_rules && join_rules.getContent().join_rule === 'public') continue;
+
+            const members = rooms[i].getJoinedMembers();
+            if (members.length === 2 &&
+                userIds.indexOf(members[0].userId) !== -1 &&
+                userIds.indexOf(members[1].userId) !== -1)
+            {
+                existingRoomId = rooms[i].roomId;
+                break;
+            }
+
+            const invited = rooms[i].getMembersWithMembership('invite');
+            if (members.length === 1 &&
+                invited.length === 1 &&
+                userIds.indexOf(members[0].userId) !== -1 &&
+                userIds.indexOf(invited[0].userId) !== -1 &&
+                invitedRoomId === null)
+            {
+                invitedRoomId = rooms[i].roomId;
+                // keep looking: we'll use this one if there's nothing better
+            }
+        }
+
+        if (existingRoomId === null) {
+            existingRoomId = invitedRoomId;
+        }
+
+        return existingRoomId;
+    },
+
+    onDeviceVerificationChanged: function(userId, device) {
+        if (!this._enableDevices) {
+            return;
+        }
+
+        if (userId == this.props.member.userId) {
+            // no need to re-download the whole thing; just update our copy of
+            // the list.
+            var devices = MatrixClientPeg.get().getStoredDevicesForUser(userId);
+            this.setState({devices: devices});
+        }
+    },
+
+    _updateStateForNewMember: function(member) {
+        var newState = this._calculateOpsPermissions(member);
+        newState.devicesLoading = true;
+        newState.devices = null;
+        this.setState(newState);
+
+        if (this._cancelDeviceList) {
+            this._cancelDeviceList();
+            this._cancelDeviceList = null;
+        }
+
+        this._downloadDeviceList(member);
+    },
+
+    _downloadDeviceList: function(member) {
+        if (!this._enableDevices) {
+            return;
+        }
+
+        var cancelled = false;
+        this._cancelDeviceList = function() { cancelled = true; }
+
+        var client = MatrixClientPeg.get();
+        var self = this;
+        client.downloadKeys([member.userId], true).finally(function() {
+            self._cancelDeviceList = null;
+        }).done(function() {
+            if (cancelled) {
+                // we got cancelled - presumably a different user now
+                return;
+            }
+            var devices = client.getStoredDevicesForUser(member.userId);
+            self.setState({devicesLoading: false, devices: devices});
+        }, function(err) {
+            console.log("Error downloading devices", err);
+            self.setState({devicesLoading: false});
+        });
     },
 
     onKick: function() {
         var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
         var roomId = this.props.member.roomId;
         var target = this.props.member.userId;
-        MatrixClientPeg.get().kick(roomId, target).done(function() {
+        this.setState({ updating: this.state.updating + 1 });
+        MatrixClientPeg.get().kick(roomId, target).then(function() {
                 // NO-OP; rely on the m.room.member event coming down else we could
                 // get out of sync if we force setState here!
                 console.log("Kick success");
@@ -67,7 +218,9 @@ module.exports = React.createClass({
                     description: err.message
                 });
             }
-        );
+        ).finally(()=>{
+            this.setState({ updating: this.state.updating - 1 });
+        });
         this.props.onFinished();
     },
 
@@ -75,7 +228,8 @@ module.exports = React.createClass({
         var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
         var roomId = this.props.member.roomId;
         var target = this.props.member.userId;
-        MatrixClientPeg.get().ban(roomId, target).done(
+        this.setState({ updating: this.state.updating + 1 });
+        MatrixClientPeg.get().ban(roomId, target).then(
             function() {
                 // NO-OP; rely on the m.room.member event coming down else we could
                 // get out of sync if we force setState here!
@@ -86,7 +240,9 @@ module.exports = React.createClass({
                     description: err.message
                 });
             }
-        );
+        ).finally(()=>{
+            this.setState({ updating: this.state.updating - 1 });
+        });
         this.props.onFinished();
     },
 
@@ -122,7 +278,8 @@ module.exports = React.createClass({
         level = parseInt(level);
 
         if (level !== NaN) {
-            MatrixClientPeg.get().setPowerLevel(roomId, target, level, powerLevelEvent).done(
+            this.setState({ updating: this.state.updating + 1 });
+            MatrixClientPeg.get().setPowerLevel(roomId, target, level, powerLevelEvent).then(
                 function() {
                     // NO-OP; rely on the m.room.member event coming down else we could
                     // get out of sync if we force setState here!
@@ -133,9 +290,11 @@ module.exports = React.createClass({
                         description: err.message
                     });
                 }
-            );
+            ).finally(()=>{
+                this.setState({ updating: this.state.updating - 1 });
+            });
         }
-        this.props.onFinished();        
+        this.props.onFinished();
     },
 
     onModToggle: function() {
@@ -164,19 +323,49 @@ module.exports = React.createClass({
         if (modLevel > 50 && defaultLevel < 50) modLevel = 50; // try to stick with the vector level defaults
         // toggle the level
         var newLevel = this.state.isTargetMod ? defaultLevel : modLevel;
-        MatrixClientPeg.get().setPowerLevel(roomId, target, parseInt(newLevel), powerLevelEvent).done(
+        this.setState({ updating: this.state.updating + 1 });
+        MatrixClientPeg.get().setPowerLevel(roomId, target, parseInt(newLevel), powerLevelEvent).then(
             function() {
                 // NO-OP; rely on the m.room.member event coming down else we could
                 // get out of sync if we force setState here!
                 console.log("Mod toggle success");
             }, function(err) {
+                if (err.errcode == 'M_GUEST_ACCESS_FORBIDDEN') {
+                    var NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
+                    Modal.createDialog(NeedToRegisterDialog, {
+                        title: "Please Register",
+                        description: "This action cannot be performed by a guest user. Please register to be able to do this."
+                    });
+                } else {
+                    Modal.createDialog(ErrorDialog, {
+                        title: "Moderator toggle error",
+                        description: err.message
+                    });
+                }
+            }
+        ).finally(()=>{
+            this.setState({ updating: this.state.updating - 1 });
+        });
+        this.props.onFinished();
+    },
+
+    _applyPowerChange: function(roomId, target, powerLevel, powerLevelEvent) {
+        this.setState({ updating: this.state.updating + 1 });
+        MatrixClientPeg.get().setPowerLevel(roomId, target, parseInt(powerLevel), powerLevelEvent).then(
+            function() {
+                // NO-OP; rely on the m.room.member event coming down else we could
+                // get out of sync if we force setState here!
+                console.log("Power change success");
+            }, function(err) {
                 Modal.createDialog(ErrorDialog, {
-                    title: "Mod error",
+                    title: "Failure to change power level",
                     description: err.message
                 });
             }
-        );
-        this.props.onFinished();        
+        ).finally(()=>{
+            this.setState({ updating: this.state.updating - 1 });
+        });
+        this.props.onFinished();
     },
 
     onPowerChange: function(powerLevel) {
@@ -184,6 +373,7 @@ module.exports = React.createClass({
         var roomId = this.props.member.roomId;
         var target = this.props.member.userId;
         var room = MatrixClientPeg.get().getRoom(roomId);
+        var self = this;
         if (!room) {
             this.props.onFinished();
             return;
@@ -195,76 +385,63 @@ module.exports = React.createClass({
             this.props.onFinished();
             return;
         }
-        MatrixClientPeg.get().setPowerLevel(roomId, target, parseInt(powerLevel), powerLevelEvent).done(
-            function() {
-                // NO-OP; rely on the m.room.member event coming down else we could
-                // get out of sync if we force setState here!
-                console.log("Power change success");
-            }, function(err) {
-                Modal.createDialog(ErrorDialog, {
-                    title: "Failure to change power level",
-                    description: err.message
+        if (powerLevelEvent.getContent().users) {
+            var myPower = powerLevelEvent.getContent().users[MatrixClientPeg.get().credentials.userId];
+            if (parseInt(myPower) === parseInt(powerLevel)) {
+                var QuestionDialog = sdk.getComponent("dialogs.QuestionDialog");
+                Modal.createDialog(QuestionDialog, {
+                    title: "Warning",
+                    description:
+                        <div>
+                            You will not be able to undo this change as you are promoting the user to have the same power level as yourself.<br/>
+                            Are you sure?
+                        </div>,
+                    button: "Continue",
+                    onFinished: function(confirmed) {
+                        if (confirmed) {
+                            self._applyPowerChange(roomId, target, powerLevel, powerLevelEvent);
+                        }
+                        else {
+                            self.props.onFinished();
+                        }
+                    },
                 });
             }
-        );
-        this.props.onFinished();        
-    },    
-
-    onChatClick: function() {
-        // check if there are any existing rooms with just us and them (1:1)
-        // If so, just view that room. If not, create a private room with them.
-        var self = this;
-        var rooms = MatrixClientPeg.get().getRooms();
-        var userIds = [
-            this.props.member.userId,
-            MatrixClientPeg.get().credentials.userId
-        ];
-        var existingRoomId = null;
-        for (var i = 0; i < rooms.length; i++) {
-            var members = rooms[i].getJoinedMembers();
-            if (members.length === 2) {
-                var hasTargetUsers = true;
-                for (var j = 0; j < members.length; j++) {
-                    if (userIds.indexOf(members[j].userId) === -1) {
-                        hasTargetUsers = false;
-                        break;
-                    }
-                }
-                if (hasTargetUsers) {
-                    existingRoomId = rooms[i].roomId;
-                    break;
-                }
+            else {
+                this._applyPowerChange(roomId, target, powerLevel, powerLevelEvent);
             }
         }
+        else {
+            this._applyPowerChange(roomId, target, powerLevel, powerLevelEvent);
+        }
+    },
 
-        if (existingRoomId) {
+    onChatClick: function() {
+        var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+
+        // TODO: keep existingOneToOneRoomId updated if we see any room member changes anywhere
+
+        const useExistingOneToOneRoom = this.state.existingOneToOneRoomId && (this.state.existingOneToOneRoomId !== this.props.member.roomId);
+
+        // check if there are any existing rooms with just us and them (1:1)
+        // If so, just view that room. If not, create a private room with them.
+        if (useExistingOneToOneRoom) {
             dis.dispatch({
                 action: 'view_room',
-                room_id: existingRoomId
+                room_id: this.state.existingOneToOneRoomId,
             });
             this.props.onFinished();
         }
         else {
-            self.setState({ creatingRoom: true });
-            MatrixClientPeg.get().createRoom({
-                invite: [this.props.member.userId],
-                preset: "private_chat"
-            }).done(
-                function(res) {
-                    self.setState({ creatingRoom: false });
-                    dis.dispatch({
-                        action: 'view_room',
-                        room_id: res.room_id
-                    });
-                    self.props.onFinished();
-                }, function(err) {
-                    self.setState({ creatingRoom: false });
-                    console.error(
-                        "Failed to create room: %s", JSON.stringify(err)
-                    );
-                    self.props.onFinished();
-                }
-            );
+            this.setState({ updating: this.state.updating + 1 });
+            createRoom({
+                createOpts: {
+                    invite: [this.props.member.userId],
+                },
+            }).finally(() => {
+                this.props.onFinished();
+                this.setState({ updating: this.state.updating - 1 });
+            }).done();
         }
     },
 
@@ -273,21 +450,7 @@ module.exports = React.createClass({
             action: 'leave_room',
             room_id: this.props.member.roomId,
         });
-        this.props.onFinished();        
-    },
-
-    getInitialState: function() {
-        return {
-            can: {
-                kick: false,
-                ban: false,
-                mute: false,
-                modifyLevel: false
-            },
-            muted: false,
-            isTargetMod: false,
-            creatingRoom: false
-        }
+        this.props.onFinished();
     },
 
     _calculateOpsPermissions: function(member) {
@@ -307,6 +470,9 @@ module.exports = React.createClass({
             return defaultPerms;
         }
         var me = room.getMember(MatrixClientPeg.get().credentials.userId);
+        if (!me) {
+            return defaultPerms;
+        }
         var them = member;
         return {
             can: this._calculateCanPermissions(
@@ -364,22 +530,87 @@ module.exports = React.createClass({
         });
     },
 
+    onMemberAvatarClick: function () {
+        var avatarUrl = this.props.member.user ? this.props.member.user.avatarUrl : this.props.member.events.member.getContent().avatar_url;
+        if(!avatarUrl) return;
+
+        var httpUrl = MatrixClientPeg.get().mxcUrlToHttp(avatarUrl);
+        var ImageView = sdk.getComponent("elements.ImageView");
+        var params = {
+            src: httpUrl,
+            name: this.props.member.name
+        };
+
+        Modal.createDialog(ImageView, params, "mx_Dialog_lightbox");
+    },
+
+    _renderDevices: function() {
+        if (!this._enableDevices) {
+            return null;
+        }
+
+        var devices = this.state.devices;
+        var MemberDeviceInfo = sdk.getComponent('rooms.MemberDeviceInfo');
+        var Spinner = sdk.getComponent("elements.Spinner");
+
+        var devComponents;
+        if (this.state.devicesLoading) {
+            // still loading
+            devComponents = <Spinner />;
+        } else if (devices === null) {
+            devComponents = "Unable to load device list";
+        } else if (devices.length === 0) {
+            devComponents = "No registered devices";
+        } else {
+            devComponents = [];
+            for (var i = 0; i < devices.length; i++) {
+                devComponents.push(<MemberDeviceInfo key={i}
+                                       userId={this.props.member.userId}
+                                       device={devices[i]}/>);
+            }
+        }
+
+        return (
+            <div>
+                <h3>Devices</h3>
+                <div className="mx_MemberInfo_devices">
+                    {devComponents}
+                </div>
+            </div>
+        );
+    },
+
     render: function() {
         var startChat, kickButton, banButton, muteButton, giveModButton, spinner;
         if (this.props.member.userId !== MatrixClientPeg.get().credentials.userId) {
             // FIXME: we're referring to a vector component from react-sdk
             var BottomLeftMenuTile = sdk.getComponent('rooms.BottomLeftMenuTile');
-            startChat = <BottomLeftMenuTile collapsed={ false } img="img/create-big.svg" label="Start chat" onClick={ this.onChatClick }/>
+
+            var label;
+            if (this.state.existingOneToOneRoomId) {
+                if (this.state.existingOneToOneRoomId == this.props.member.roomId) {
+                    label = "Start new direct chat";
+                }
+                else {
+                    label = "Go to direct chat";
+                }
+            }
+            else {
+                label = "Start direct chat";
+            }
+
+            startChat = <BottomLeftMenuTile collapsed={ false } img="img/create-big.svg"
+                                            label={ label } onClick={ this.onChatClick }/>
         }
 
-        if (this.state.creatingRoom) {
+        if (this.state.updating) {
             var Loader = sdk.getComponent("elements.Spinner");
             spinner = <Loader imgClassName="mx_ContextualMenu_spinner"/>;
         }
 
         if (this.state.can.kick) {
             kickButton = <div className="mx_MemberInfo_field" onClick={this.onKick}>
-                Kick
+                { this.props.member.membership === "invite" ? "Disinvite" : "Kick" }
             </div>;
         }
         if (this.state.can.ban) {
@@ -405,7 +636,7 @@ module.exports = React.createClass({
 
         var adminTools;
         if (kickButton || banButton || muteButton || giveModButton) {
-            adminTools = 
+            adminTools =
                 <div>
                     <h3>Admin tools</h3>
 
@@ -418,27 +649,32 @@ module.exports = React.createClass({
                 </div>
         }
 
+        const memberName = this.props.member.name;
+
         var MemberAvatar = sdk.getComponent('avatars.MemberAvatar');
         var PowerSelector = sdk.getComponent('elements.PowerSelector');
+        const EmojiText = sdk.getComponent('elements.EmojiText');
         return (
             <div className="mx_MemberInfo">
                 <img className="mx_MemberInfo_cancel" src="img/cancel.svg" width="18" height="18" onClick={this.onCancel}/>
                 <div className="mx_MemberInfo_avatar">
-                    <MemberAvatar member={this.props.member} width={48} height={48} />
+                    <MemberAvatar onClick={this.onMemberAvatarClick} member={this.props.member} width={48} height={48} />
                 </div>
 
-                <h2>{ this.props.member.name }</h2>
+                <EmojiText element="h2">{memberName}</EmojiText>
 
                 <div className="mx_MemberInfo_profile">
                     <div className="mx_MemberInfo_profileField">
                         { this.props.member.userId }
                     </div>
                     <div className="mx_MemberInfo_profileField">
-                        Level: <b><PowerSelector value={ parseInt(this.props.member.powerLevel) } disabled={ !this.state.can.modifyLevel } onChange={ this.onPowerChange }/></b>
+                        Level: <b><PowerSelector controlled={true} value={ parseInt(this.props.member.powerLevel) } disabled={ !this.state.can.modifyLevel } onChange={ this.onPowerChange }/></b>
                     </div>
                 </div>
 
                 { startChat }
+
+                { this._renderDevices() }
 
                 { adminTools }
 
@@ -447,4 +683,3 @@ module.exports = React.createClass({
         );
     }
 });
-

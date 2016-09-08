@@ -17,16 +17,16 @@ limitations under the License.
 'use strict';
 
 var React = require('react');
-var ReactDom = require('react-dom');
 var classNames = require("classnames");
 
 var sdk = require('../../../index');
 var MatrixClientPeg = require('../../../MatrixClientPeg')
 var TextForEvent = require('../../../TextForEvent');
 
-var ContextualMenu = require('../../../ContextualMenu');
-var Velociraptor = require('../../../Velociraptor');
-require('../../../VelocityBounce');
+var ContextualMenu = require('../../structures/ContextualMenu');
+var dispatcher = require("../../../dispatcher");
+
+var ObjectUtils = require('../../../ObjectUtils');
 
 var bounce = false;
 try {
@@ -44,7 +44,8 @@ var eventTileTypes = {
     'm.call.hangup' : 'messages.TextualEvent',
     'm.room.name'   : 'messages.TextualEvent',
     'm.room.topic'  : 'messages.TextualEvent',
-    'm.room.third_party_invite': 'messages.TextualEvent'
+    'm.room.third_party_invite' : 'messages.TextualEvent',
+    'm.room.history_visibility' : 'messages.TextualEvent',
 };
 
 var MAX_READ_AVATARS = 5;
@@ -61,10 +62,11 @@ var MAX_READ_AVATARS = 5;
 // '----------------------------------------------------------'
 
 module.exports = React.createClass({
-    displayName: 'Event',
+    displayName: 'EventTile',
 
     statics: {
         haveTileForEvent: function(e) {
+            if (e.isRedacted()) return false;
             if (eventTileTypes[e.getType()] == undefined) return false;
             if (eventTileTypes[e.getType()] == 'messages.TextualEvent') {
                 return TextForEvent.textForEvent(e) !== '';
@@ -93,36 +95,173 @@ module.exports = React.createClass({
          */
         contextual: React.PropTypes.bool,
 
-        /* a list of words to highlight */
+        /* a list of words to highlight, ordered by longest first */
         highlights: React.PropTypes.array,
 
-        /* a function to be called when the highlight is clicked */
-        onHighlightClick: React.PropTypes.func,
+        /* link URL for the highlights */
+        highlightLink: React.PropTypes.string,
 
-        /* is this the focussed event */
+        /* should show URL previews for this event */
+        showUrlPreview: React.PropTypes.bool,
+
+        /* is this the focused event */
         isSelectedEvent: React.PropTypes.bool,
+
+        /* callback called when dynamic content in events are loaded */
+        onWidgetLoad: React.PropTypes.func,
+
+        /* a list of Room Members whose read-receipts we should show */
+        readReceipts: React.PropTypes.arrayOf(React.PropTypes.object),
+
+        /* opaque readreceipt info for each userId; used by ReadReceiptMarker
+         * to manage its animations. Should be an empty object when the room
+         * first loads
+         */
+        readReceiptMap: React.PropTypes.object,
+
+        /* A function which is used to check if the parent panel is being
+         * unmounted, to avoid unnecessary work. Should return true if we
+         * are being unmounted.
+         */
+        checkUnmounting: React.PropTypes.func,
+
+        /* the status of this event - ie, mxEvent.status. Denormalised to here so
+         * that we can tell when it changes. */
+        eventSendStatus: React.PropTypes.string,
     },
 
     getInitialState: function() {
-        return {menu: false, allReadAvatars: false};
+        return {menu: false, allReadAvatars: false, verified: null};
+    },
+
+    componentWillMount: function() {
+        // don't do RR animations until we are mounted
+        this._suppressReadReceiptAnimation = true;
+        this._verifyEvent(this.props.mxEvent);
+    },
+
+    componentDidMount: function() {
+        this._suppressReadReceiptAnimation = false;
+        MatrixClientPeg.get().on("deviceVerificationChanged",
+                                 this.onDeviceVerificationChanged);
+    },
+
+    componentWillReceiveProps: function (nextProps) {
+        if (nextProps.mxEvent !== this.props.mxEvent) {
+            this._verifyEvent(nextProps.mxEvent);
+        }
+    },
+
+    shouldComponentUpdate: function (nextProps, nextState) {
+        if (!ObjectUtils.shallowEqual(this.state, nextState)) {
+            return true;
+        }
+
+        if (!this._propsEqual(this.props, nextProps)) {
+            return true;
+        }
+
+        return false;
+    },
+
+    componentWillUnmount: function() {
+        var client = MatrixClientPeg.get();
+        if (client) {
+            client.removeListener("deviceVerificationChanged",
+                                  this.onDeviceVerificationChanged);
+        }
+    },
+
+    onDeviceVerificationChanged: function(userId, device) {
+        if (userId == this.props.mxEvent.getSender()) {
+            this._verifyEvent(this.props.mxEvent);
+        }
+    },
+
+    _verifyEvent: function(mxEvent) {
+        var verified = null;
+
+        if (mxEvent.isEncrypted()) {
+            verified = MatrixClientPeg.get().isEventSenderVerified(mxEvent);
+        }
+
+        this.setState({
+            verified: verified
+        });
+    },
+
+    _propsEqual: function(objA, objB) {
+        var keysA = Object.keys(objA);
+        var keysB = Object.keys(objB);
+
+        if (keysA.length !== keysB.length) {
+            return false;
+        }
+
+        for (var i = 0; i < keysA.length; i++) {
+            var key = keysA[i];
+
+            if (!objB.hasOwnProperty(key)) {
+                return false;
+            }
+
+            // need to deep-compare readReceipts
+            if (key == 'readReceipts') {
+                var rA = objA[key];
+                var rB = objB[key];
+                if (rA === rB) {
+                    continue;
+                }
+
+                if (!rA || !rB) {
+                    return false;
+                }
+
+                if (rA.length !== rB.length) {
+                    return false;
+                }
+                for (var j = 0; j < rA.length; j++) {
+                    if (rA[j].userId !== rB[j].userId) {
+                        return false;
+                    }
+                }
+            } else {
+                if (objA[key] !== objB[key]) {
+                    return false;
+                }
+            }
+        }
+        return true;
     },
 
     shouldHighlight: function() {
         var actions = MatrixClientPeg.get().getPushActionsForEvent(this.props.mxEvent);
         if (!actions || !actions.tweaks) { return false; }
+
+        // don't show self-highlights from another of our clients
+        if (this.props.mxEvent.sender &&
+            this.props.mxEvent.sender.userId === MatrixClientPeg.get().credentials.userId)
+        {
+            return false;
+        }
+
         return actions.tweaks.highlight;
     },
 
     onEditClicked: function(e) {
-        var MessageContextMenu = sdk.getComponent('rooms.MessageContextMenu');
+        var MessageContextMenu = sdk.getComponent('context_menus.MessageContextMenu');
         var buttonRect = e.target.getBoundingClientRect()
-        var x = buttonRect.right;
-        var y = buttonRect.top + (e.target.height / 2);
+
+        // The window X and Y offsets are to adjust position when zoomed in to page
+        var x = buttonRect.right + window.pageXOffset;
+        var y = (buttonRect.top + (e.target.height / 2) + window.pageYOffset) - 19;
         var self = this;
         ContextualMenu.createMenu(MessageContextMenu, {
+            chevronOffset: 10,
             mxEvent: this.props.mxEvent,
             left: x,
             top: y,
+            eventTileOps: this.refs.tile && this.refs.tile.getEventTileOps ? this.refs.tile.getEventTileOps() : undefined,
             onFinished: function() {
                 self.setState({menu: false});
             }
@@ -137,96 +276,53 @@ module.exports = React.createClass({
     },
 
     getReadAvatars: function() {
+        var ReadReceiptMarker = sdk.getComponent('rooms.ReadReceiptMarker');
         var avatars = [];
-
-        var room = MatrixClientPeg.get().getRoom(this.props.mxEvent.getRoomId());
-
-        if (!room) return [];
-
-        var myUserId = MatrixClientPeg.get().credentials.userId;
-
-        // get list of read receipts, sorted most recent first
-        var receipts = room.getReceiptsForEvent(this.props.mxEvent).filter(function(r) {
-            return r.type === "m.read" && r.userId != myUserId;
-        }).sort(function(r1, r2) {
-            return r2.data.ts - r1.data.ts;
-        });
-
-        var MemberAvatar = sdk.getComponent('avatars.MemberAvatar');
 
         var left = 0;
 
-        var reorderTransitionOpts = {
-            duration: 100,
-            easing: 'easeOut'
-        };
-
+        var receipts = this.props.readReceipts || [];
         for (var i = 0; i < receipts.length; ++i) {
-            var member = room.getMember(receipts[i].userId);
-            if (!member) {
-                continue;
+            var member = receipts[i];
+
+            var hidden = true;
+            if ((i < MAX_READ_AVATARS) || this.state.allReadAvatars) {
+                hidden = false;
             }
 
-            // Using react refs here would mean both getting Velociraptor to expose
-            // them and making them scoped to the whole RoomView. Not impossible, but
-            // getElementById seems simpler at least for a first cut.
-            var oldAvatarDomNode = document.getElementById('mx_readAvatar'+member.userId);
-            var startStyles = [];
-            var enterTransitionOpts = [];
-            var oldNodeTop = -15; // For avatars that weren't on screen, act as if they were just off the top
-            if (oldAvatarDomNode) {
-                oldNodeTop = oldAvatarDomNode.getBoundingClientRect().top;
-            }
+            var userId = member.userId;
+            var readReceiptInfo;
 
-            if (this.readAvatarNode) {
-                var topOffset = oldNodeTop - this.readAvatarNode.getBoundingClientRect().top;
-
-                if (oldAvatarDomNode && oldAvatarDomNode.style.left !== '0px') {
-                    var leftOffset = oldAvatarDomNode.style.left;
-                    // start at the old height and in the old h pos
-                    startStyles.push({ top: topOffset, left: leftOffset });
-                    enterTransitionOpts.push(reorderTransitionOpts);
+            if (this.props.readReceiptMap) {
+                readReceiptInfo = this.props.readReceiptMap[userId];
+                if (!readReceiptInfo) {
+                    readReceiptInfo = {};
+                    this.props.readReceiptMap[userId] = readReceiptInfo;
                 }
-
-                // then shift to the rightmost column,
-                // and then it will drop down to its resting position
-                startStyles.push({ top: topOffset, left: '0px' });
-                enterTransitionOpts.push({
-                    duration: bounce ? Math.min(Math.log(Math.abs(topOffset)) * 200, 3000) : 300,
-                    easing: bounce ? 'easeOutBounce' : 'easeOutCubic',
-                });
             }
-
-            var style = {
-                left: left+'px',
-                top: '0px',
-                visibility: ((i < MAX_READ_AVATARS) || this.state.allReadAvatars) ? 'visible' : 'hidden'
-            };
 
             //console.log("i = " + i + ", MAX_READ_AVATARS = " + MAX_READ_AVATARS + ", allReadAvatars = " + this.state.allReadAvatars + " visibility = " + style.visibility);
 
             // add to the start so the most recent is on the end (ie. ends up rightmost)
             avatars.unshift(
-                <MemberAvatar key={member.userId} member={member}
-                    width={14} height={14} resizeMethod="crop"
-                    style={style}
-                    startStyle={startStyles}
-                    enterTransitionOpts={enterTransitionOpts}
-                    id={'mx_readAvatar'+member.userId}
+                <ReadReceiptMarker key={userId} member={member}
+                    leftOffset={left} hidden={hidden}
+                    readReceiptInfo={readReceiptInfo}
+                    checkUnmounting={this.props.checkUnmounting}
+                    suppressAnimation={this._suppressReadReceiptAnimation}
                     onClick={this.toggleAllReadAvatars}
                 />
             );
+
             // TODO: we keep the extra read avatars in the dom to make animation simpler
             // we could optimise this to reduce the dom size.
-            if (i < MAX_READ_AVATARS - 1 || this.state.allReadAvatars) { // XXX: where does this -1 come from? is it to make the max'th avatar animate properly?
+            if (!hidden) {
                 left -= 15;
             }
         }
-        var editButton;
+        var remText;
         if (!this.state.allReadAvatars) {
             var remainder = receipts.length - MAX_READ_AVATARS;
-            var remText;
-            if (i >= MAX_READ_AVATARS - 1) left -= 15;
             if (remainder > 0) {
                 remText = <span className="mx_EventTile_readAvatarRemainder"
                     onClick={this.toggleAllReadAvatars}
@@ -234,24 +330,27 @@ module.exports = React.createClass({
                 </span>;
                 left -= 15;
             }
-            editButton = (
-                <input style={{ left: left }}
-                    type="image" src="img/edit.png" alt="Options" title="Options" width="14" height="14"
-                    className="mx_EventTile_editButton" onClick={this.onEditClicked} />
-            );
         }
 
-        return <span className="mx_EventTile_readAvatars" ref={this.collectReadAvatarNode}>
-            { editButton }
+        return <span className="mx_EventTile_readAvatars">
             { remText }
-            <Velociraptor transition={ reorderTransitionOpts }>
-                { avatars }
-            </Velociraptor>
+            { avatars }
         </span>;
     },
 
-    collectReadAvatarNode: function(node) {
-        this.readAvatarNode = ReactDom.findDOMNode(node);
+    onMemberAvatarClick: function(event) {
+        dispatcher.dispatch({
+            action: 'view_user',
+            member: this.props.mxEvent.sender,
+        });
+    },
+
+    onSenderProfileClick: function(event) {
+        var mxEvent = this.props.mxEvent;
+        dispatcher.dispatch({
+            action: 'insert_displayname',
+            displayname: mxEvent.sender ? mxEvent.sender.name : mxEvent.getSender(),
+        });
     },
 
     render: function() {
@@ -259,10 +358,17 @@ module.exports = React.createClass({
         var SenderProfile = sdk.getComponent('messages.SenderProfile');
         var MemberAvatar = sdk.getComponent('avatars.MemberAvatar');
 
+        //console.log("EventTile showUrlPreview for %s is %s", this.props.mxEvent.getId(), this.props.showUrlPreview);
+
         var content = this.props.mxEvent.getContent();
         var msgtype = content.msgtype;
+        var eventType = this.props.mxEvent.getType();
 
-        var EventTileType = sdk.getComponent(eventTileTypes[this.props.mxEvent.getType()]);
+        // Info messages are basically information about commands processed on a
+        // room, or emote messages
+        var isInfoMessage = (msgtype === 'm.emote' || eventType !== 'm.room.message');
+
+        var EventTileType = sdk.getComponent(eventTileTypes[eventType]);
         // This shouldn't happen: the caller should check we support this type
         // before trying to instantiate us
         if (!EventTileType) {
@@ -271,50 +377,84 @@ module.exports = React.createClass({
 
         var classes = classNames({
             mx_EventTile: true,
+            mx_EventTile_info: isInfoMessage,
             mx_EventTile_sending: ['sending', 'queued'].indexOf(
-                this.props.mxEvent.status
+                this.props.eventSendStatus
             ) !== -1,
-            mx_EventTile_notSent: this.props.mxEvent.status == 'not_sent',
+            mx_EventTile_notSent: this.props.eventSendStatus == 'not_sent',
             mx_EventTile_highlight: this.shouldHighlight(),
             mx_EventTile_selected: this.props.isSelectedEvent,
             mx_EventTile_continuation: this.props.continuation,
             mx_EventTile_last: this.props.last,
             mx_EventTile_contextual: this.props.contextual,
             menu: this.state.menu,
+            mx_EventTile_verified: this.state.verified == true,
+            mx_EventTile_unverified: this.state.verified == false,
         });
-        var timestamp = <MessageTimestamp ts={this.props.mxEvent.getTs()} />
-
-        var aux = null;
-        if (msgtype === 'm.image') aux = "sent an image";
-        else if (msgtype === 'm.video') aux = "sent a video";
-        else if (msgtype === 'm.file') aux = "uploaded a file";
+        var timestamp = <a href={ "#/room/" + this.props.mxEvent.getRoomId() +"/"+ this.props.mxEvent.getId() }>
+                            <MessageTimestamp ts={this.props.mxEvent.getTs()} />
+                        </a>
 
         var readAvatars = this.getReadAvatars();
 
         var avatar, sender;
-        if (!this.props.continuation) {
-            if (this.props.mxEvent.sender) {
-                avatar = (
-                    <div className="mx_EventTile_avatar">
-                        <MemberAvatar member={this.props.mxEvent.sender} width={24} height={24} />
-                    </div>
-                );
-            }
-            if (EventTileType.needsSenderProfile()) {
-                sender = <SenderProfile mxEvent={this.props.mxEvent} aux={aux} />;
-            }
+        let avatarSize;
+        let needsSenderProfile;
+
+        if (isInfoMessage) {
+            // a small avatar, with no sender profile, for emotes and
+            // joins/parts/etc
+            avatarSize = 14;
+            needsSenderProfile = false;
+        } else if (this.props.continuation) {
+            // no avatar or sender profile for continuation messages
+            avatarSize = 0;
+            needsSenderProfile = false;
+        } else {
+            avatarSize = 30;
+            needsSenderProfile = true;
         }
+
+        if (this.props.mxEvent.sender && avatarSize) {
+            avatar = (
+                    <div className="mx_EventTile_avatar">
+                        <MemberAvatar member={this.props.mxEvent.sender}
+                            width={avatarSize} height={avatarSize}
+                            onClick={ this.onMemberAvatarClick }
+                        />
+                    </div>
+            );
+        }
+
+        if (needsSenderProfile) {
+            let aux = null;
+            if (msgtype === 'm.image') aux = "sent an image";
+            else if (msgtype === 'm.video') aux = "sent a video";
+            else if (msgtype === 'm.file') aux = "uploaded a file";
+
+            sender = <SenderProfile onClick={ this.onSenderProfileClick } mxEvent={this.props.mxEvent} aux={aux} />;
+        }
+
+        var editButton = (
+            <img className="mx_EventTile_editButton" src="img/icon_context_message.svg" width="19" height="19" alt="Options" title="Options" onClick={this.onEditClicked} />
+        );
+
         return (
             <div className={classes}>
                 <div className="mx_EventTile_msgOption">
-                    { timestamp }
                     { readAvatars }
                 </div>
                 { avatar }
                 { sender }
                 <div className="mx_EventTile_line">
-                    <EventTileType mxEvent={this.props.mxEvent} highlights={this.props.highlights} 
-                          onHighlightClick={this.props.onHighlightClick} />
+                    { timestamp }
+                    <EventTileType ref="tile"
+                        mxEvent={this.props.mxEvent}
+                        highlights={this.props.highlights}
+                        highlightLink={this.props.highlightLink}
+                        showUrlPreview={this.props.showUrlPreview}
+                        onWidgetLoad={this.props.onWidgetLoad} />
+                    { editButton }
                 </div>
             </div>
         );

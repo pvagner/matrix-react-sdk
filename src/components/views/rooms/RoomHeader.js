@@ -18,7 +18,6 @@ limitations under the License.
 
 var React = require('react');
 var sdk = require('../../../index');
-var dis = require("../../../dispatcher");
 var MatrixClientPeg = require('../../../MatrixClientPeg');
 var Modal = require("../../../Modal");
 
@@ -33,7 +32,10 @@ module.exports = React.createClass({
 
     propTypes: {
         room: React.PropTypes.object,
+        oobData: React.PropTypes.object,
         editing: React.PropTypes.bool,
+        saving: React.PropTypes.bool,
+        rightPanelCollapsed: React.PropTypes.bool,
         onSettingsClick: React.PropTypes.func,
         onSaveClick: React.PropTypes.func,
         onSearchClick: React.PropTypes.func,
@@ -48,16 +50,15 @@ module.exports = React.createClass({
         };
     },
 
-    componentWillReceiveProps: function(newProps) {
-        if (newProps.editing) {
-            var topic = this.props.room.currentState.getStateEvents('m.room.topic', '');
-            var name = this.props.room.currentState.getStateEvents('m.room.name', '');
+    componentDidMount: function() {
+        var cli = MatrixClientPeg.get();
+        cli.on("RoomState.events", this._onRoomStateEvents);
 
-            this.setState({
-                name: name ? name.getContent().name : '',
-                defaultName: this.props.room.getDefaultRoomName(MatrixClientPeg.get().credentials.userId),
-                topic: topic ? topic.getContent().topic : '',
-            });
+        // When a room name occurs, RoomState.events is fired *before*
+        // room.name is updated. So we have to listen to Room.name as well as
+        // RoomState.events.
+        if (this.props.room) {
+            this.props.room.on("Room.name", this._onRoomNameChange);
         }
     },
 
@@ -67,28 +68,27 @@ module.exports = React.createClass({
         }
     },
 
-    onVideoClick: function(e) {
-        dis.dispatch({
-            action: 'place_call',
-            type: e.shiftKey ? "screensharing" : "video",
-            room_id: this.props.room.roomId
-        });
+    componentWillUnmount: function() {
+        if (this.props.room) {
+            this.props.room.removeListener("Room.name", this._onRoomNameChange);
+        }
+        var cli = MatrixClientPeg.get();
+        if (cli) {
+            cli.removeListener("RoomState.events", this._onRoomStateEvents);
+        }
     },
 
-    onVoiceClick: function() {
-        dis.dispatch({
-            action: 'place_call',
-            type: "voice",
-            room_id: this.props.room.roomId
-        });
+    _onRoomStateEvents: function(event, state) {
+        if (!this.props.room || event.getRoomId() != this.props.room.roomId) {
+            return;
+        }
+
+        // redisplay the room name, topic, etc.
+        this.forceUpdate();
     },
 
-    onNameChanged: function(value) {
-        this.setState({ name : value });
-    },
-
-    onTopicChanged: function(value) {
-        this.setState({ topic : value });
+    _onRoomNameChange: function(room) {
+        this.forceUpdate();
     },
 
     onAvatarPickerClick: function(ev) {
@@ -112,216 +112,214 @@ module.exports = React.createClass({
                 description: "Failed to set avatar. " + errMsg
             });
         }).done();
-    },    
-
-    getRoomName: function() {
-        return this.state.name;
     },
 
-    getTopic: function() {
-        return this.state.topic;
+    /**
+     * After editing the settings, get the new name for the room
+     *
+     * Returns undefined if we didn't let the user edit the room name
+     */
+    getEditedName: function() {
+        var newName;
+        if (this.refs.nameEditor) {
+            newName = this.refs.nameEditor.getRoomName();
+        }
+        return newName;
+    },
+
+    /**
+     * After editing the settings, get the new topic for the room
+     *
+     * Returns undefined if we didn't let the user edit the room topic
+     */
+    getEditedTopic: function() {
+        var newTopic;
+        if (this.refs.topicEditor) {
+            newTopic = this.refs.topicEditor.getTopic();
+        }
+        return newTopic;
     },
 
     render: function() {
-        var EditableText = sdk.getComponent("elements.EditableText");
         var RoomAvatar = sdk.getComponent("avatars.RoomAvatar");
         var ChangeAvatar = sdk.getComponent("settings.ChangeAvatar");
         var TintableSvg = sdk.getComponent("elements.TintableSvg");
+        const EmojiText = sdk.getComponent('elements.EmojiText');
 
         var header;
-        if (this.props.simpleHeader) {
-            var cancel;
-            if (this.props.onCancelClick) {
-                cancel = <img className="mx_RoomHeader_simpleHeaderCancel" src="img/cancel.svg" onClick={ this.props.onCancelClick } alt="Close" width="18" height="18"/>
-            }
-            header =
-                <div className="mx_RoomHeader_wrapper">
-                    <div className="mx_RoomHeader_simpleHeader">
-                        { this.props.simpleHeader }
-                        { cancel }
-                    </div>
-                </div>
+        var name = null;
+        var searchStatus = null;
+        var topic_el = null;
+        var cancel_button = null;
+        var spinner = null;
+        var save_button = null;
+        var settings_button = null;
+        if (this.props.editing) {
+
+            // calculate permissions.  XXX: this should be done on mount or something
+            var user_id = MatrixClientPeg.get().credentials.userId;
+
+            var can_set_room_name = this.props.room.currentState.maySendStateEvent(
+                'm.room.name', user_id
+            );
+            var can_set_room_avatar = this.props.room.currentState.maySendStateEvent(
+                'm.room.avatar', user_id
+            );
+            var can_set_room_topic = this.props.room.currentState.maySendStateEvent(
+                'm.room.topic', user_id
+            );
+            var can_set_room_name = this.props.room.currentState.maySendStateEvent(
+                'm.room.name', user_id
+            );
+
+            save_button = <div className="mx_RoomHeader_textButton" onClick={this.props.onSaveClick}>Save</div>
+            cancel_button = <div className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </div>
+        }
+
+        if (this.props.saving) {
+            var Spinner = sdk.getComponent("elements.Spinner");
+            spinner = <div className="mx_RoomHeader_spinner"><Spinner/></div>;
+        }
+
+        if (can_set_room_name) {
+            var RoomNameEditor = sdk.getComponent("rooms.RoomNameEditor");
+            name = <RoomNameEditor ref="nameEditor" room={this.props.room} />
         }
         else {
-            var name = null;
-            var searchStatus = null;
-            var topic_el = null;
-            var cancel_button = null;
-            var save_button = null;
-            var settings_button = null;
-            if (this.props.editing) {
-
-                // calculate permissions.  XXX: this should be done on mount or something, and factored out with RoomSettings
-                var power_levels = this.props.room.currentState.getStateEvents('m.room.power_levels', '');
-                var events_levels = (power_levels ? power_levels.events : {}) || {};
-                var user_id = MatrixClientPeg.get().credentials.userId;
-
-                if (power_levels) {
-                    power_levels = power_levels.getContent();
-                    var default_user_level = parseInt(power_levels.users_default || 0);
-                    var user_levels = power_levels.users || {};
-                    var current_user_level = user_levels[user_id];
-                    if (current_user_level == undefined) current_user_level = default_user_level;
-                } else {
-                    var default_user_level = 0;
-                    var user_levels = [];
-                    var current_user_level = 0;
-                }
-                var state_default = parseInt((power_levels ? power_levels.state_default : 0) || 0);
-
-                var room_avatar_level = state_default;
-                if (events_levels['m.room.avatar'] !== undefined) {
-                    room_avatar_level = events_levels['m.room.avatar'];
-                }
-                var can_set_room_avatar = current_user_level >= room_avatar_level;
-
-                var room_name_level = state_default;
-                if (events_levels['m.room.name'] !== undefined) {
-                    room_name_level = events_levels['m.room.name'];
-                }
-                var can_set_room_name = current_user_level >= room_name_level;
-
-                var room_topic_level = state_default;
-                if (events_levels['m.room.topic'] !== undefined) {
-                    room_topic_level = events_levels['m.room.topic'];
-                }
-                var can_set_room_topic = current_user_level >= room_topic_level;
-
-                var placeholderName = "Unnamed Room";
-                if (this.state.defaultName && this.state.defaultName !== 'Empty room') {
-                    placeholderName += " (" + this.state.defaultName + ")";
-                }
-
-                save_button = <button className="mx_RoomHeader_textButton" onClick={this.props.onSaveClick}>Save</button>
-                cancel_button = <button className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </button>
+            var searchStatus;
+            // don't display the search count until the search completes and
+            // gives us a valid (possibly zero) searchCount.
+            if (this.props.searchInfo && this.props.searchInfo.searchCount !== undefined && this.props.searchInfo.searchCount !== null) {
+                searchStatus = <div className="mx_RoomHeader_searchStatus">&nbsp;(~{ this.props.searchInfo.searchCount } results)</div>;
             }
 
-            if (can_set_room_name) {
-                name =
-                    <div className="mx_RoomHeader_name">
-                        <EditableText
-                             className="mx_RoomHeader_nametext mx_RoomHeader_editable"
-                             placeholderClassName="mx_RoomHeader_placeholder"
-                             placeholder={ placeholderName }
-                             blurToCancel={ false }
-                             onValueChanged={ this.onNameChanged }
-                             initialValue={ this.state.name }/>
-                    </div>
-            }
-            else {
-                var searchStatus;
-                // don't display the search count until the search completes and
-                // gives us a valid (possibly zero) searchCount.
-                if (this.props.searchInfo && this.props.searchInfo.searchCount !== undefined && this.props.searchInfo.searchCount !== null) {
-                    searchStatus = <div className="mx_RoomHeader_searchStatus">&nbsp;(~{ this.props.searchInfo.searchCount } results)</div>;
-                }
-
-                // XXX: this is a bit inefficient - we could just compare room.name for 'Empty room'...
-                var members = this.props.room.getJoinedMembers();
-                var settingsHint = false;
+            // XXX: this is a bit inefficient - we could just compare room.name for 'Empty room'...
+            var settingsHint = false;
+            var members = this.props.room ? this.props.room.getJoinedMembers() : undefined;
+            if (members) {
                 if (members.length === 1 && members[0].userId === MatrixClientPeg.get().credentials.userId) {
                     var name = this.props.room.currentState.getStateEvents('m.room.name', '');
                     if (!name || !name.getContent().name) {
                         settingsHint = true;
                     }
                 }
-
-                name =
-                    <div className="mx_RoomHeader_name" onClick={this.props.onSettingsClick}>
-                        <div className={ "mx_RoomHeader_nametext " + (settingsHint ? "mx_RoomHeader_settingsHint" : "") } title={ this.props.room.name }>{ this.props.room.name }</div>
-                        { searchStatus }
-                        <button className="mx_RoomHeader_settingsButton" title="Settings">
-                            <TintableSvg src="img/settings.svg" width="12" height="12"/>
-                        </button>
-                    </div>
             }
 
-            if (can_set_room_topic) {
-                topic_el =
-                    <EditableText 
-                         className="mx_RoomHeader_topic mx_RoomHeader_editable"
-                         placeholderClassName="mx_RoomHeader_placeholder"
-                         placeholder="Add a topic"
-                         blurToCancel={ false }
-                         onValueChanged={ this.onTopicChanged }
-                         initialValue={ this.state.topic }/>
-            } else {
-                var topic = this.props.room.currentState.getStateEvents('m.room.topic', '');
-                if (topic) topic_el = <div className="mx_RoomHeader_topic" ref="topic" title={ topic.getContent().topic }>{ topic.getContent().topic }</div>;
+            var roomName = 'Join Room';
+            if (this.props.oobData && this.props.oobData.name) {
+                roomName = this.props.oobData.name;
+            } else if (this.props.room) {
+                roomName = this.props.room.name;
             }
 
-            var roomAvatar = null;
-            if (this.props.room) {
-                if (can_set_room_avatar) {
-                    roomAvatar = (
-                        <div className="mx_RoomHeader_avatarPicker">
-                            <div onClick={ this.onAvatarPickerClick }>
-                                <ChangeAvatar ref="changeAvatar" room={this.props.room} showUploadSection={false} width={48} height={48} />
-                            </div>
-                            <div className="mx_RoomHeader_avatarPicker_edit">
-                                <label htmlFor="avatarInput" ref="file_label">
-                                    <img src="img/camera.svg"
-                                        alt="Upload avatar" title="Upload avatar"
-                                        width="17" height="15" />
-                                </label>
-                                <input id="avatarInput" type="file" onChange={ this.onAvatarSelected }/>
-                            </div>
-                        </div>
-                    );
-                }
-                else {
-                    roomAvatar = (
-                        <div onClick={this.props.onSettingsClick}>
-                            <RoomAvatar room={this.props.room} width={48} height={48}/>
-                        </div>
-                    );
-                }
-            }
 
-            var leave_button;
-            if (this.props.onLeaveClick) {
-                leave_button =
-                    <button className="mx_RoomHeader_button mx_RoomHeader_leaveButton" onClick={this.props.onLeaveClick} title="Leave room">
-                        <TintableSvg src="img/leave.svg" width="26" height="20"/>
-                    </button>;
-            }
-
-            var forget_button;
-            if (this.props.onForgetClick) {
-                forget_button =
-                    <button className="mx_RoomHeader_button mx_RoomHeader_leaveButton" onClick={this.props.onForgetClick} title="Forget room">
-                        <TintableSvg src="img/leave.svg" width="26" height="20"/>
-                    </button>;
-            }
-
-            var right_row;
-            if (!this.props.editing) {
-                right_row = 
-                    <div className="mx_RoomHeader_rightRow">
-                        { forget_button }
-                        { leave_button }
-                        <button className="mx_RoomHeader_button" onClick={this.props.onSearchClick} title="Search">
-                            <TintableSvg src="img/search.svg" width="21" height="19"/>
-                        </button>
-                    </div>;
-            }
-
-            header =
-                <div className="mx_RoomHeader_wrapper">
-                    <div className="mx_RoomHeader_leftRow">
-                        <div className="mx_RoomHeader_avatar">
-                            { roomAvatar }
-                        </div>
-                        <div className="mx_RoomHeader_info">
-                            { name }
-                            { topic_el }
-                        </div>
-                    </div>
-                    {save_button}
-                    {cancel_button}
-                    {right_row}
-                </div>
+            name =
+                <div className="mx_RoomHeader_name" onClick={this.props.onSettingsClick}>
+                    <EmojiText element="div" className={ "mx_RoomHeader_nametext " + (settingsHint ? "mx_RoomHeader_settingsHint" : "") } title={ roomName }>{roomName}</EmojiText>
+                    { searchStatus }
+                </div>;
         }
+
+        if (can_set_room_topic) {
+            var RoomTopicEditor = sdk.getComponent("rooms.RoomTopicEditor");
+            topic_el = <RoomTopicEditor ref="topicEditor" room={this.props.room} />
+        } else {
+            var topic;
+            if (this.props.room) {
+                var ev = this.props.room.currentState.getStateEvents('m.room.topic', '');
+                if (ev) {
+                    topic = ev.getContent().topic;
+                }
+            }
+            if (topic) {
+                topic_el = <div className="mx_RoomHeader_topic" ref="topic" title={ topic }>{ topic }</div>;
+            }
+        }
+
+        var roomAvatar = null;
+        if (can_set_room_avatar) {
+            roomAvatar = (
+                <div className="mx_RoomHeader_avatarPicker">
+                    <div onClick={ this.onAvatarPickerClick }>
+                        <ChangeAvatar ref="changeAvatar" room={this.props.room} showUploadSection={false} width={48} height={48} />
+                    </div>
+                    <div className="mx_RoomHeader_avatarPicker_edit">
+                        <label htmlFor="avatarInput" ref="file_label">
+                            <img src="img/camera.svg"
+                                alt="Upload avatar" title="Upload avatar"
+                                width="17" height="15" />
+                        </label>
+                        <input id="avatarInput" type="file" onChange={ this.onAvatarSelected }/>
+                    </div>
+                </div>
+            );
+        }
+        else if (this.props.room || (this.props.oobData && this.props.oobData.name)) {
+            roomAvatar = (
+                <div onClick={this.props.onSettingsClick}>
+                    <RoomAvatar room={this.props.room} width={48} height={48} oobData={this.props.oobData} />
+                </div>
+            );
+        }
+
+        var settings_button;
+        if (this.props.onSettingsClick) {
+            settings_button =
+                <button className="mx_RoomHeader_button" onClick={this.props.onSettingsClick} title="Settings">
+                    <TintableSvg src="img/icons-settings-room.svg" width="16" height="16"/>
+                </button>;
+        }
+
+//        var leave_button;
+//        if (this.props.onLeaveClick) {
+//            leave_button =
+//                <div className="mx_RoomHeader_button" onClick={this.props.onLeaveClick} title="Leave room">
+//                    <TintableSvg src="img/leave.svg" width="26" height="20"/>
+//                </div>;
+//        }
+
+        var forget_button;
+        if (this.props.onForgetClick) {
+            forget_button =
+                <div className="mx_RoomHeader_button" onClick={this.props.onForgetClick} title="Forget room">
+                    <TintableSvg src="img/leave.svg" width="26" height="20"/>
+                </div>;
+        }
+
+        var rightPanel_buttons;
+        if (this.props.rightPanelCollapsed) {
+            // TODO: embed the RightPanel header in here if it's collapsed.
+        }
+
+        var right_row;
+        if (!this.props.editing) {
+            right_row =
+                <div className="mx_RoomHeader_rightRow">
+                    { settings_button }
+                    { forget_button }
+                    <div className="mx_RoomHeader_button" onClick={this.props.onSearchClick} title="Search">
+                        <TintableSvg src="img/icons-search.svg" width="35" height="35"/>
+                    </div>
+                    { rightPanel_buttons }
+                </div>;
+        }
+
+        header =
+            <div className="mx_RoomHeader_wrapper">
+                <div className="mx_RoomHeader_leftRow">
+                    <div className="mx_RoomHeader_avatar">
+                        { roomAvatar }
+                    </div>
+                    <div className="mx_RoomHeader_info">
+                        { name }
+                        { topic_el }
+                    </div>
+                </div>
+                {spinner}
+                {save_button}
+                {cancel_button}
+                {right_row}
+            </div>;
 
         return (
             <div className={ "mx_RoomHeader " + (this.props.editing ? "mx_RoomHeader_editing" : "") }>

@@ -28,6 +28,23 @@ var PRESENCE_CLASS = {
     "unavailable": "mx_EntityTile_unavailable"
 };
 
+
+function presenceClassForMember(presenceState, lastActiveAgo) {
+    // offline is split into two categories depending on whether we have
+    // a last_active_ago for them.
+    if (presenceState == 'offline') {
+        if (lastActiveAgo) {
+            return PRESENCE_CLASS['offline'] + '_beenactive';
+        } else {
+            return PRESENCE_CLASS['offline'] + '_neveractive';
+        }
+    } else if (presenceState) {
+        return PRESENCE_CLASS[presenceState];
+    } else {
+        return PRESENCE_CLASS['offline'] + '_neveractive';
+    }
+}
+
 module.exports = React.createClass({
     displayName: 'EntityTile',
 
@@ -37,7 +54,9 @@ module.exports = React.createClass({
         avatarJsx: React.PropTypes.any, // <BaseAvatar />
         className: React.PropTypes.string,
         presenceState: React.PropTypes.string,
-        presenceActiveAgo: React.PropTypes.number,
+        presenceLastActiveAgo: React.PropTypes.number,
+        presenceLastTs: React.PropTypes.number,
+        presenceCurrentlyActive: React.PropTypes.bool,
         showInviteButton: React.PropTypes.bool,
         shouldComponentUpdate: React.PropTypes.func,
         onClick: React.PropTypes.func,
@@ -49,7 +68,8 @@ module.exports = React.createClass({
             shouldComponentUpdate: function(nextProps, nextState) { return true; },
             onClick: function() {},
             presenceState: "offline",
-            presenceActiveAgo: -1,
+            presenceLastActiveAgo: 0,
+            presenceLastTs: 0,
             showInviteButton: false,
             suppressOnHover: false
         };
@@ -75,28 +95,35 @@ module.exports = React.createClass({
     },
 
     render: function() {
-        var presenceClass = PRESENCE_CLASS[this.props.presenceState] || "mx_EntityTile_offline";
+        const presenceClass = presenceClassForMember(
+            this.props.presenceState, this.props.presenceLastActiveAgo
+        );
+
         var mainClassName = "mx_EntityTile ";
         mainClassName += presenceClass + (this.props.className ? (" " + this.props.className) : "");
         var nameEl;
+        const {name} = this.props;
 
+        const EmojiText = sdk.getComponent('elements.EmojiText');
         if (this.state.hover && !this.props.suppressOnHover) {
+            var activeAgo = this.props.presenceLastActiveAgo ?
+                (Date.now() - (this.props.presenceLastTs - this.props.presenceLastActiveAgo)) : -1;
+
             mainClassName += " mx_EntityTile_hover";
             var PresenceLabel = sdk.getComponent("rooms.PresenceLabel");
             nameEl = (
                 <div className="mx_EntityTile_details">
                     <img className="mx_EntityTile_chevron" src="img/member_chevron.png" width="8" height="12"/>
-                    <div className="mx_EntityTile_name_hover">{ this.props.name }</div>
-                    <PresenceLabel activeAgo={this.props.presenceActiveAgo}
+                    <EmojiText element="div" className="mx_EntityTile_name_hover">{name}</EmojiText>
+                    <PresenceLabel activeAgo={ activeAgo }
+                        currentlyActive={this.props.presenceCurrentlyActive}
                         presenceState={this.props.presenceState} />
                 </div>
             );
         }
         else {
             nameEl = (
-                <div className="mx_EntityTile_name">
-                    { this.props.name }
-                </div>
+                <EmojiText element="div" className="mx_EntityTile_name">{name}</EmojiText>
             );
         }
 

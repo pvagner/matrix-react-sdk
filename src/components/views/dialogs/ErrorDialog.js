@@ -20,7 +20,7 @@ limitations under the License.
  *   title: "some text", (default: "Error")
  *   description: "some more text",
  *   button: "Button Text",
- *   onClose: someFunction,
+ *   onFinished: someFunction,
  *   focus: true|false (default: true)
  * });
  */
@@ -31,6 +31,10 @@ module.exports = React.createClass({
     displayName: 'ErrorDialog',
     propTypes: {
         title: React.PropTypes.string,
+        description: React.PropTypes.oneOfType([
+            React.PropTypes.element,
+            React.PropTypes.string,
+        ]),
         button: React.PropTypes.string,
         focus: React.PropTypes.bool,
         onFinished: React.PropTypes.func.isRequired,
@@ -55,7 +59,7 @@ module.exports = React.createClass({
                     {this.props.description}
                 </div>
                 <div className="mx_Dialog_buttons">
-                    <button onClick={this.props.onFinished} autoFocus={this.props.focus}>
+                    <button className="mx_Dialog_primary" onClick={this.props.onFinished} autoFocus={this.props.focus}>
                         {this.props.button}
                     </button>
                 </div>

@@ -19,25 +19,17 @@ limitations under the License.
 var React = require('react');
 
 var TextForEvent = require('../../../TextForEvent');
+import sdk from '../../../index';
 
 module.exports = React.createClass({
     displayName: 'TextualEvent',
 
-    statics: {
-        needsSenderProfile: function() {
-            return false;
-        }
-    },
-
     render: function() {
+        const EmojiText = sdk.getComponent('elements.EmojiText');
         var text = TextForEvent.textForEvent(this.props.mxEvent);
-        if (text == null || text.length == 0) return null;
-
+        if (text == null || text.length === 0) return null;
         return (
-            <div className="mx_TextualEvent">
-                {TextForEvent.textForEvent(this.props.mxEvent)}
-            </div>
+            <EmojiText element="div" className="mx_TextualEvent">{text}</EmojiText>
         );
     },
 });
-
