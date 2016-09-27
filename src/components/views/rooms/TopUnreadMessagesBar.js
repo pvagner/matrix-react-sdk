@@ -30,17 +30,19 @@ module.exports = React.createClass({
     render: function() {
         return (
             <div className="mx_TopUnreadMessagesBar">
-                <div className="mx_TopUnreadMessagesBar_scrollUp"
+                <button className="mx_TopUnreadMessagesBar_scrollUp"
                         onClick={this.props.onScrollUpClick}>
                     <img src="img/scrollup.svg" width="24" height="24"
                         alt="Scroll to unread messages"
                         title="Scroll to unread messages"/>
                     Unread messages. <span style={{ textDecoration: 'underline' }} onClick={this.props.onCloseClick}>Mark all read</span>
-                </div>
-                <img className="mx_TopUnreadMessagesBar_close"
-                    src="img/cancel.svg" width="18" height="18"
-                    alt="Close" title="Close"
-                    onClick={this.props.onCloseClick} />
+                </button>
+                <button className="mx_TopUnreadMessagesBar_close"
+                        onClick={this.props.onCloseClick}>
+                    <img src="img/cancel.svg" width="18" height="18"
+                        alt="Close"
+                        title="Close"/>
+                </button>
             </div>
         );
     },

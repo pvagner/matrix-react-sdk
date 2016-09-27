@@ -33,7 +33,7 @@ module.exports = React.createClass({
     render: function() {
         var cancelButton;
         if (this.props.onCancelClick) {
-            cancelButton = <div className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </div>
+            cancelButton = <button className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </button>
         }
 
         return (

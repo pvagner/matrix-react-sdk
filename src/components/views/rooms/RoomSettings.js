@@ -553,16 +553,16 @@ module.exports = React.createClass({
         if (myMember) {
             if (myMember.membership === "join") {
                 leaveButton = (
-                    <div className="mx_RoomSettings_leaveButton" onClick={ this.onLeaveClick }>
+                    <button className="mx_RoomSettings_leaveButton" onClick={ this.onLeaveClick }>
                         Leave room
-                    </div>
+                    </button>
                 );
             }
             else if (myMember.membership === "leave") {
                 leaveButton = (
-                    <div className="mx_RoomSettings_leaveButton" onClick={ this.onForgetClick }>
+                    <button className="mx_RoomSettings_leaveButton" onClick={ this.onForgetClick }>
                         Forget room
-                    </div>
+                    </button>
                 );
             }
         }

@@ -172,8 +172,8 @@ module.exports = React.createClass({
                 'm.room.name', user_id
             );
 
-            save_button = <div className="mx_RoomHeader_textButton" onClick={this.props.onSaveClick}>Save</div>
-            cancel_button = <div className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </div>
+            save_button = <button className="mx_RoomHeader_textButton" onClick={this.props.onSaveClick}>Save</button>
+            cancel_button = <button className="mx_RoomHeader_cancelButton" onClick={this.props.onCancelClick}><img src="img/cancel.svg" width="18" height="18" alt="Cancel"/> </button>
         }
 
         if (this.props.saving) {
@@ -190,7 +190,7 @@ module.exports = React.createClass({
             // don't display the search count until the search completes and
             // gives us a valid (possibly zero) searchCount.
             if (this.props.searchInfo && this.props.searchInfo.searchCount !== undefined && this.props.searchInfo.searchCount !== null) {
-                searchStatus = <div className="mx_RoomHeader_searchStatus">&nbsp;(~{ this.props.searchInfo.searchCount } results)</div>;
+                searchStatus = <div className="mx_RoomHeader_searchStatus" role="alert">&nbsp;(~{ this.props.searchInfo.searchCount } results)</div>;
             }
 
             // XXX: this is a bit inefficient - we could just compare room.name for 'Empty room'...
@@ -281,9 +281,9 @@ module.exports = React.createClass({
         var forget_button;
         if (this.props.onForgetClick) {
             forget_button =
-                <div className="mx_RoomHeader_button" onClick={this.props.onForgetClick} title="Forget room">
+                <button className="mx_RoomHeader_button" onClick={this.props.onForgetClick} title="Forget room">
                     <TintableSvg src="img/leave.svg" width="26" height="20"/>
-                </div>;
+                </button>;
         }
 
         var rightPanel_buttons;
@@ -297,9 +297,9 @@ module.exports = React.createClass({
                 <div className="mx_RoomHeader_rightRow">
                     { settings_button }
                     { forget_button }
-                    <div className="mx_RoomHeader_button" onClick={this.props.onSearchClick} title="Search">
+                    <button className="mx_RoomHeader_button" onClick={this.props.onSearchClick} title="Search">
                         <TintableSvg src="img/icons-search.svg" width="35" height="35"/>
-                    </div>
+                    </button>
                     { rightPanel_buttons }
                 </div>;
         }

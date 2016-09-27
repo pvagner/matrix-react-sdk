@@ -229,7 +229,7 @@ module.exports = React.createClass({
             var error_box = "";
             if (curr_phase == this.phases.ERROR) {
                 error_box = (
-                    <div className="mx_Error">
+                    <div role="alert" className="mx_Error">
                         An error occured: {this.state.error_string}
                     </div>
                 );
