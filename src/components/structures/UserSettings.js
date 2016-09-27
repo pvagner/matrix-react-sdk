@@ -26,21 +26,6 @@ var GeminiScrollbar = require('react-gemini-scrollbar');
 var Email = require('../../email');
 var AddThreepid = require('../../AddThreepid');
 
-const LABS_FEATURES = [
-    {
-        name: 'Rich Text Editor',
-        id: 'rich_text_editor'
-    },
-    {
-        name: 'End-to-End Encryption',
-        id: 'e2e_encryption'
-    },
-    {
-        name: 'Integration Management',
-        id: 'integration_management'
-    },
-];
-
 // if this looks like a release, use the 'version' from package.json; else use
 // the git sha.
 const REACT_SDK_VERSION =
@@ -57,6 +42,9 @@ module.exports = React.createClass({
 
         // True to show the 'labs' section of experimental features
         enableLabs: React.PropTypes.bool,
+
+        // true if RightPanel is collapsed
+        collapsedRhs: React.PropTypes.bool,
     },
 
     getDefaultProps: function() {
@@ -339,14 +327,17 @@ module.exports = React.createClass({
 
         var client = MatrixClientPeg.get();
         var deviceId = client.deviceId;
-        var olmKey = client.getDeviceEd25519Key() || "<not supported>";
+        var identityKey = client.getDeviceEd25519Key() || "<not supported>";
+
+        var myDevice = client.getStoredDevicesForUser(MatrixClientPeg.get().credentials.userId)[0];
         return (
             <div>
                 <h3>Cryptography</h3>
-                <div className="mx_UserSettings_section">
+                <div className="mx_UserSettings_section mx_UserSettings_cryptoSection">
                     <ul>
-                        <li>Device ID: {deviceId}</li>
-                        <li>Device key: {olmKey}</li>
+                        <li><label>Device name:</label> <span>{ myDevice.getDisplayName() }</span></li>
+                        <li><label>Device ID:</label>   <span><code>{deviceId}</code></span></li>
+                        <li><label>Device key:</label>  <span><code><b>{identityKey}</b></code></span></li>
                     </ul>
                 </div>
             </div>
@@ -361,7 +352,7 @@ module.exports = React.createClass({
         return (
             <div>
                 <h3>Devices</h3>
-                <DevicesPanel className="mx_UserSettings_section" />
+                <DevicesPanel className="mx_UserSettings_section"/>
             </div>
         );
     },
@@ -370,14 +361,24 @@ module.exports = React.createClass({
         // default to enabled if undefined
         if (this.props.enableLabs === false) return null;
 
-        let features = LABS_FEATURES.map(feature => (
+        let features = UserSettingsStore.LABS_FEATURES.map(feature => (
             <div key={feature.id} className="mx_UserSettings_toggle">
                 <input
                     type="checkbox"
                     id={feature.id}
                     name={feature.id}
-                    defaultChecked={UserSettingsStore.isFeatureEnabled(feature.id)}
+                    defaultChecked={ UserSettingsStore.isFeatureEnabled(feature.id) }
                     onChange={e => {
+                        if (MatrixClientPeg.get().isGuest()) {
+                            e.target.checked = false;
+                            var NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
+                            Modal.createDialog(NeedToRegisterDialog, {
+                                title: "Please Register",
+                                description: "Guests can't use labs features. Please register.",
+                            });
+                            return;
+                        }
+
                         UserSettingsStore.setFeatureEnabled(feature.id, e.target.checked);
                         this.forceUpdate();
                     }}/>
@@ -504,9 +505,21 @@ module.exports = React.createClass({
             </div>);
         }
 
+        var olmVersion = MatrixClientPeg.get().olmVersion;
+        // If the olmVersion is not defined then either crypto is disabled, or
+        // we are using a version old version of olm. We assume the former.
+        var olmVersionString = "<not-enabled>";
+        if (olmVersion !== undefined) {
+            olmVersionString = olmVersion[0] + "." + olmVersion[1] + "." + olmVersion[2];
+        }
+
         return (
             <div className="mx_UserSettings">
-                <SimpleRoomHeader title="Settings" onCancelClick={ this.props.onClose }/>
+                <SimpleRoomHeader
+                    title="Settings"
+                    collapsedRhs={ this.props.collapsedRhs }
+                    onCancelClick={ this.props.onClose }
+                />
 
                 <GeminiScrollbar className="mx_UserSettings_body"
                                  autoshow={true}>
@@ -575,6 +588,7 @@ module.exports = React.createClass({
                     <div className="mx_UserSettings_advanced">
                         matrix-react-sdk version: {REACT_SDK_VERSION}<br/>
                         vector-web version: {this.props.version}<br/>
+                        olm version: {olmVersionString}<br/>
                     </div>
                 </div>
 

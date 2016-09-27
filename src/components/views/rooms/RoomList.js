@@ -27,6 +27,7 @@ var sdk = require('../../../index');
 var rate_limited_func = require('../../../ratelimitedfunc');
 var Rooms = require('../../../Rooms');
 var DMRoomMap = require('../../../utils/DMRoomMap');
+var Receipt = require('../../../utils/Receipt');
 
 var HIDE_CONFERENCE_CHANS = true;
 
@@ -58,6 +59,7 @@ module.exports = React.createClass({
         cli.on("Room.receipt", this.onRoomReceipt);
         cli.on("RoomState.events", this.onRoomStateEvents);
         cli.on("RoomMember.name", this.onRoomMemberName);
+        cli.on("accountData", this.onAccountData);
 
         var s = this.getRoomLists();
         this.setState(s);
@@ -72,14 +74,13 @@ module.exports = React.createClass({
     componentDidUpdate: function() {
         // Reinitialise the stickyHeaders when the component is updated
         this._updateStickyHeaders(true);
+        this._repositionIncomingCallBox(undefined, false);
     },
 
     onAction: function(payload) {
         switch (payload.action) {
             case 'view_tooltip':
                 this.tooltip = payload.tooltip;
-                this._repositionTooltip();
-                if (this.tooltip) this.tooltip.style.display = 'block';
                 break;
             case 'call_state':
                 var call = CallHandler.getCall(payload.room_id);
@@ -109,6 +110,7 @@ module.exports = React.createClass({
             MatrixClientPeg.get().removeListener("Room.receipt", this.onRoomReceipt);
             MatrixClientPeg.get().removeListener("RoomState.events", this.onRoomStateEvents);
             MatrixClientPeg.get().removeListener("RoomMember.name", this.onRoomMemberName);
+            MatrixClientPeg.get().removeListener("accountData", this.onAccountData);
         }
         // cancel any pending calls to the rate_limited_funcs
         this._delayedRefreshRoomList.cancelPendingCall();
@@ -146,21 +148,18 @@ module.exports = React.createClass({
         this._updateStickyHeaders(true, scrollToPosition);
     },
 
-    onRoomTimeline: function(ev, room, toStartOfTimeline) {
+    onRoomTimeline: function(ev, room, toStartOfTimeline, removed, data) {
         if (toStartOfTimeline) return;
+        if (!room) return;
+        if (data.timeline.getTimelineSet() !== room.getUnfilteredTimelineSet()) return;
         this._delayedRefreshRoomList();
     },
 
     onRoomReceipt: function(receiptEvent, room) {
         // because if we read a notification, it will affect notification count
         // only bother updating if there's a receipt from us
-        var receiptKeys = Object.keys(receiptEvent.getContent());
-        for (var i = 0; i < receiptKeys.length; ++i) {
-            var rcpt = receiptEvent.getContent()[receiptKeys[i]];
-            if (rcpt['m.read'] && rcpt['m.read'][MatrixClientPeg.get().credentials.userId]) {
-                this._delayedRefreshRoomList();
-                break;
-            }
+        if (Receipt.findReadReceiptFromUserId(receiptEvent, MatrixClientPeg.get().credentials.userId)) {
+            this._delayedRefreshRoomList();
         }
     },
 
@@ -178,6 +177,12 @@ module.exports = React.createClass({
 
     onRoomMemberName: function(ev, member) {
         this._delayedRefreshRoomList();
+    },
+
+    onAccountData: function(ev) {
+        if (ev.getType() == 'm.direct') {
+            this._delayedRefreshRoomList();
+        }
     },
 
     _delayedRefreshRoomList: new rate_limited_func(function() {
@@ -227,10 +232,6 @@ module.exports = React.createClass({
             else if (HIDE_CONFERENCE_CHANS && Rooms.isConfCallRoom(room, me, self.props.ConferenceHandler)) {
                 // skip past this room & don't put it in any lists
             }
-            else if (dmRoomMap.getUserIdForRoomId(room.roomId)) {
-                // "Direct Message" rooms
-                s.lists["im.vector.fake.direct"].push(room);
-            }
             else if (me.membership == "join" || me.membership === "ban" ||
                      (me.membership === "leave" && me.events.member.getSender() !== me.events.member.getStateKey()))
             {
@@ -244,6 +245,10 @@ module.exports = React.createClass({
                         s.lists[tagNames[i]].push(room);
                     }
                 }
+                else if (dmRoomMap.getUserIdForRoomId(room.roomId)) {
+                    // "Direct Message" rooms (that we're still in and that aren't otherwise tagged)
+                    s.lists["im.vector.fake.direct"].push(room);
+                }
                 else {
                     s.lists["im.vector.fake.recent"].push(room);
                 }
@@ -256,7 +261,10 @@ module.exports = React.createClass({
             }
         });
 
-        if (s.lists["im.vector.fake.direct"].length == 0 && MatrixClientPeg.get().getAccountData('m.direct') === undefined) {
+        if (s.lists["im.vector.fake.direct"].length == 0 &&
+            MatrixClientPeg.get().getAccountData('m.direct') === undefined &&
+            !MatrixClientPeg.get().isGuest())
+        {
             // scan through the 'recents' list for any rooms which look like DM rooms
             // and make them DM rooms
             const oldRecents = s.lists["im.vector.fake.recent"];
@@ -307,56 +315,38 @@ module.exports = React.createClass({
     },
 
     _whenScrolling: function(e) {
-        this._repositionTooltip(e);
+        this._hideTooltip(e);
         this._repositionIncomingCallBox(e, false);
         this._updateStickyHeaders(false);
     },
 
-    _repositionTooltip: function(e) {
-        // We access the parent of the parent, as the tooltip is inside a container
-        // Needs refactoring into a better multipurpose tooltip
-        if (this.tooltip && this.tooltip.parentElement && this.tooltip.parentElement.parentElement) {
-            var scroll = ReactDOM.findDOMNode(this);
-            this.tooltip.style.top = (3 + scroll.parentElement.offsetTop + this.tooltip.parentElement.parentElement.offsetTop - this._getScrollNode().scrollTop) + "px";
+    _hideTooltip: function(e) {
+        // Hide tooltip when scrolling, as we'll no longer be over the one we were on
+        if (this.tooltip && this.tooltip.style.display !== "none") {
+            this.tooltip.style.display = "none";
         }
     },
 
     _repositionIncomingCallBox: function(e, firstTime) {
         var incomingCallBox = document.getElementById("incomingCallBox");
         if (incomingCallBox && incomingCallBox.parentElement) {
-            var scroll = this._getScrollNode();
-            var top = (scroll.offsetTop + incomingCallBox.parentElement.offsetTop - scroll.scrollTop);
+            var scrollArea = this._getScrollNode();
+            // Use the offset of the top of the scroll area from the window
+            // as this is used to calculate the CSS fixed top position for the stickies
+            var scrollAreaOffset = scrollArea.getBoundingClientRect().top + window.pageYOffset;
+            // Use the offset of the top of the componet from the window
+            // as this is used to calculate the CSS fixed top position for the stickies
+            var scrollAreaHeight = ReactDOM.findDOMNode(this).getBoundingClientRect().height;
 
-            if (firstTime) {
-                // scroll to make sure the callbox is on the screen...
-                if (top < 10) { // 10px of vertical margin at top of screen
-                    scroll.scrollTop = incomingCallBox.parentElement.offsetTop - 10;
-                }
-                else if (top > scroll.clientHeight - incomingCallBox.offsetHeight + 50) {
-                    scroll.scrollTop = incomingCallBox.parentElement.offsetTop - scroll.offsetHeight + incomingCallBox.offsetHeight - 50;
-                }
-                // recalculate top in case we clipped it.
-                top = (scroll.offsetTop + incomingCallBox.parentElement.offsetTop - scroll.scrollTop);
-            }
-            else {
-                // stop the box from scrolling off the screen
-                if (top < 10) {
-                    top = 10;
-                }
-                else if (top > scroll.clientHeight - incomingCallBox.offsetHeight + 50) {
-                    top = scroll.clientHeight - incomingCallBox.offsetHeight + 50;
-                }
-            }
-
-            // slightly ugly hack to offset if there's a toolbar present.
-            // we really should be calculating our absolute offsets of top by recursing through the DOM
-            toolbar = document.getElementsByClassName("mx_MatrixToolbar")[0];
-            if (toolbar) {
-                top += toolbar.offsetHeight;
-            }
+            var top = (incomingCallBox.parentElement.getBoundingClientRect().top + window.pageYOffset)
+            // Make sure we don't go too far up, if the headers aren't sticky
+            top = (top < scrollAreaOffset) ? scrollAreaOffset : top;
+            // make sure we don't go too far down, if the headers aren't sticky
+            var bottomMargin = scrollAreaOffset + (scrollAreaHeight - 45);
+            top = (top > bottomMargin) ? bottomMargin : top;
 
             incomingCallBox.style.top = top + "px";
-            incomingCallBox.style.left = scroll.offsetLeft + scroll.offsetWidth + "px";
+            incomingCallBox.style.left = scrollArea.offsetLeft + scrollArea.offsetWidth + 12 + "px";
         }
     },
 
@@ -366,7 +356,7 @@ module.exports = React.createClass({
         var scrollArea = this._getScrollNode();
         // Use the offset of the top of the scroll area from the window
         // as this is used to calculate the CSS fixed top position for the stickies
-        var scrollAreaOffset = scrollArea.getBoundingClientRect().top;
+        var scrollAreaOffset = scrollArea.getBoundingClientRect().top + window.pageYOffset;
         // Use the offset of the top of the componet from the window
         // as this is used to calculate the CSS fixed top position for the stickies
         var scrollAreaHeight = ReactDOM.findDOMNode(this).getBoundingClientRect().height;
@@ -494,7 +484,7 @@ module.exports = React.createClass({
                              onShowMoreRooms={ self.onShowMoreRooms } />
 
                 <RoomSubList list={ self.state.lists['im.vector.fake.direct'] }
-                             label="Direct Messages"
+                             label="People"
                              editable={ false }
                              order="recent"
                              selectedRoom={ self.props.selectedRoom }

@@ -18,6 +18,7 @@ var MatrixClientPeg = require('./MatrixClientPeg');
 var Modal = require('./Modal');
 var sdk = require('./index');
 var dis = require("./dispatcher");
+var Rooms = require("./Rooms");
 
 var q = require('q');
 
@@ -28,28 +29,39 @@ var q = require('q');
  * action was aborted or failed.
  *
  * @param {object=} opts parameters for creating the room
+ * @param {string=} opts.dmUserId If specified, make this a DM room for this user and invite them
  * @param {object=} opts.createOpts set of options to pass to createRoom call.
  */
 function createRoom(opts) {
-    var opts = opts || {};
+    opts = opts || {};
 
-    var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
-    var NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
-    var Loader = sdk.getComponent("elements.Spinner");
+    const ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+    const NeedToRegisterDialog = sdk.getComponent("dialogs.NeedToRegisterDialog");
+    const Loader = sdk.getComponent("elements.Spinner");
 
-    var client = MatrixClientPeg.get();
+    const client = MatrixClientPeg.get();
     if (client.isGuest()) {
-        Modal.createDialog(NeedToRegisterDialog, {
-            title: "Please Register",
-            description: "Guest users can't create new rooms. Please register to create room and start a chat."
-        });
+        setTimeout(()=>{
+            Modal.createDialog(NeedToRegisterDialog, {
+                title: "Please Register",
+                description: "Guest users can't create new rooms. Please register to create room and start a chat."
+            })
+        }, 0);
         return q(null);
     }
 
+    const defaultPreset = opts.dmUserId ? 'trusted_private_chat' : 'private_chat';
+
     // set some defaults for the creation
-    var createOpts = opts.createOpts || {};
-    createOpts.preset = createOpts.preset || 'private_chat';
+    const createOpts = opts.createOpts || {};
+    createOpts.preset = createOpts.preset || defaultPreset;
     createOpts.visibility = createOpts.visibility || 'private';
+    if (opts.dmUserId && createOpts.invite === undefined) {
+        createOpts.invite = [opts.dmUserId];
+    }
+    if (opts.dmUserId && createOpts.is_direct === undefined) {
+        createOpts.is_direct = true;
+    }
 
     // Allow guests by default since the room is private and they'd
     // need an invite. This means clicking on a 3pid invite email can
@@ -64,20 +76,31 @@ function createRoom(opts) {
         }
     ];
 
-    var modal = Modal.createDialog(Loader, null, 'mx_Dialog_spinner');
+    let modal;
+    setTimeout(()=>{
+        modal = Modal.createDialog(Loader, null, 'mx_Dialog_spinner')
+    }, 0);
 
+    let roomId;
     return client.createRoom(createOpts).finally(function() {
-        modal.close();
+        if (modal) modal.close();
     }).then(function(res) {
+        roomId = res.room_id;
+        if (opts.dmUserId) {
+            return Rooms.setDMRoom(roomId, opts.dmUserId);
+        } else {
+            return q();
+        }
+    }).then(function() {
         // NB createRoom doesn't block on the client seeing the echo that the
         // room has been created, so we race here with the client knowing that
         // the room exists, causing things like
         // https://github.com/vector-im/vector-web/issues/1813
         dis.dispatch({
             action: 'view_room',
-            room_id: res.room_id
+            room_id: roomId
         });
-        return res.room_id;
+        return roomId;
     }, function(err) {
         Modal.createDialog(ErrorDialog, {
             title: "Failure to create room",

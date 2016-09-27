@@ -17,21 +17,23 @@ limitations under the License.
 'use strict';
 
 var React = require('react');
+var ReactDOM = require("react-dom");
 var classNames = require('classnames');
 var dis = require("../../../dispatcher");
 var MatrixClientPeg = require('../../../MatrixClientPeg');
+var DMRoomMap = require('../../../utils/DMRoomMap');
 var sdk = require('../../../index');
 var ContextualMenu = require('../../structures/ContextualMenu');
 var RoomNotifs = require('../../../RoomNotifs');
+var FormattingUtils = require('../../../utils/FormattingUtils');
 
 module.exports = React.createClass({
     displayName: 'RoomTile',
 
     propTypes: {
-        // TODO: We should *optionally* support DND stuff and ideally be impl agnostic about it
-        connectDragSource: React.PropTypes.func.isRequired,
-        connectDropTarget: React.PropTypes.func.isRequired,
-        isDragging: React.PropTypes.bool.isRequired,
+        connectDragSource: React.PropTypes.func,
+        connectDropTarget: React.PropTypes.func,
+        isDragging: React.PropTypes.bool,
 
         room: React.PropTypes.object.isRequired,
         collapsed: React.PropTypes.bool.isRequired,
@@ -39,9 +41,13 @@ module.exports = React.createClass({
         unread: React.PropTypes.bool.isRequired,
         highlight: React.PropTypes.bool.isRequired,
         isInvite: React.PropTypes.bool.isRequired,
-        roomSubList: React.PropTypes.object.isRequired,
-        refreshSubList: React.PropTypes.func.isRequired,
         incomingCall: React.PropTypes.object,
+    },
+
+    getDefaultProps: function() {
+        return {
+            isDragging: false,
+        };
     },
 
     getInitialState: function() {
@@ -61,6 +67,16 @@ module.exports = React.createClass({
 
     _shouldShowMentionBadge: function() {
         return this.state.notifState != RoomNotifs.MUTE;
+    },
+
+    _isDirectMessageRoom: function(roomId) {
+        const dmRoomMap = new DMRoomMap(MatrixClientPeg.get());
+        var dmRooms = dmRoomMap.getUserIdForRoomId(roomId);
+        if (dmRooms) {
+            return true;
+        } else {
+            return false;
+        }
     },
 
     onAccountData: function(accountDataEvent) {
@@ -91,14 +107,16 @@ module.exports = React.createClass({
 
     onMouseEnter: function() {
         this.setState( { hover : true });
+        this.badgeOnMouseEnter();
     },
 
     onMouseLeave: function() {
         this.setState( { hover : false });
+        this.badgeOnMouseLeave();
     },
 
     badgeOnMouseEnter: function() {
-        // Only allow none guests to access the context menu
+        // Only allow non-guests to access the context menu
         // and only change it if it needs to change
         if (!MatrixClientPeg.get().isGuest() && !this.state.badgeHover) {
             this.setState( { badgeHover : true } );
@@ -220,13 +238,13 @@ module.exports = React.createClass({
         if (this.state.badgeHover || this.state.notificationTagMenu) {
             badgeContent = "\u00B7\u00B7\u00B7";
         } else if (badges) {
-            var limitedCount = (notificationCount > 99) ? '99+' : notificationCount;
+            var limitedCount = FormattingUtils.formatCount(notificationCount);
             badgeContent = notificationCount ? limitedCount : '!';
         } else {
             badgeContent = '\u200B';
         }
 
-        badge = <div className={ badgeClasses } onClick={this.onBadgeClicked} onMouseEnter={this.badgeOnMouseEnter} onMouseLeave={this.badgeOnMouseLeave}>{ badgeContent }</div>;
+        badge = <div className={ badgeClasses } onClick={this.onBadgeClicked}>{ badgeContent }</div>;
 
         const EmojiText = sdk.getComponent('elements.EmojiText');
         var label;
@@ -245,19 +263,25 @@ module.exports = React.createClass({
             } else {
                 label = <EmojiText element="div" title={ name } className={ nameClasses }>{name}</EmojiText>;
             }
-        }
-        else if (this.state.hover) {
+        } else if (this.state.hover) {
             var RoomTooltip = sdk.getComponent("rooms.RoomTooltip");
-            label = <RoomTooltip room={this.props.room}/>;
+            tooltip = <RoomTooltip className="mx_RoomTile_tooltip" room={this.props.room} />;
         }
 
-        var incomingCallBox;
-        if (this.props.incomingCall) {
-            var IncomingCallBox = sdk.getComponent("voip.IncomingCallBox");
-            incomingCallBox = <IncomingCallBox incomingCall={ this.props.incomingCall }/>;
-        }
+        //var incomingCallBox;
+        //if (this.props.incomingCall) {
+        //    var IncomingCallBox = sdk.getComponent("voip.IncomingCallBox");
+        //    incomingCallBox = <IncomingCallBox incomingCall={ this.props.incomingCall }/>;
+        //}
 
         var RoomAvatar = sdk.getComponent('avatars.RoomAvatar');
+
+        var directMessageIndicator;
+        // Temporarily turning off the LGM badges as isDirectMessageRoom is horribly unperformant
+        // - see https://github.com/vector-im/vector-web/issues/2343
+        // if (this._isDirectMessageRoom(this.props.room.roomId)) {
+        //     directMessageIndicator = <img src="img/icon_person.svg" className="mx_RoomTile_dm" width="11" height="13" alt="dm"/>;
+        // }
 
         // These props are injected by React DnD,
         // as defined by your `collect` function above:
@@ -265,12 +289,13 @@ module.exports = React.createClass({
         var connectDragSource = this.props.connectDragSource;
         var connectDropTarget = this.props.connectDropTarget;
 
-        return connectDragSource(connectDropTarget(
+        let ret = (
             <div className={classes} onClick={this.onClick} onMouseEnter={this.onMouseEnter} onMouseLeave={this.onMouseLeave}>
                 <div className={avatarClasses}>
                     <div className="mx_RoomTile_avatar_menu" onClick={this.onAvatarClicked}>
                         <div className={avatarContainerClasses}>
                             <RoomAvatar room={this.props.room} width={24} height={24} />
+                            {directMessageIndicator}
                         </div>
                     </div>
                 </div>
@@ -278,9 +303,14 @@ module.exports = React.createClass({
                     { label }
                     { badge }
                 </div>
-                { incomingCallBox }
+                {/* { incomingCallBox } */}
                 { tooltip }
             </div>
-        ));
+        );
+
+        if (connectDropTarget) ret = connectDropTarget(ret);
+        if (connectDragSource) ret = connectDragSource(ret);
+
+        return ret;
     }
 });

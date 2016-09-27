@@ -92,6 +92,10 @@ module.exports = React.createClass({
         }).done();
     },
 
+    onCasLogin: function() {
+      this._loginLogic.redirectToCas();
+    },
+
     _onLoginAsGuestClick: function() {
         var self = this;
         self.setState({
@@ -199,7 +203,7 @@ module.exports = React.createClass({
                  !this.state.enteredHomeserverUrl.startsWith("http")))
             {
                 errorText = <span>
-                    Can't connect to homeserver via HTTP when using a vector served by HTTPS.
+                    Can't connect to homeserver via HTTP when using Riot served by HTTPS.
                     Either use HTTPS or <a href='https://www.google.com/search?&q=enable%20unsafe%20scripts'>enable unsafe scripts</a>
                 </span>;
             }
@@ -228,7 +232,7 @@ module.exports = React.createClass({
                 );
             case 'm.login.cas':
                 return (
-                    <CasLogin />
+                    <CasLogin onSubmit={this.onCasLogin} />
                 );
             default:
                 if (!step) {

@@ -12,7 +12,7 @@ var MatrixEvent = jssdk.MatrixEvent;
  * name to stdout.
  * @param {Mocha.Context} context  The test context
  */
-module.exports.beforeEach = function(context) {
+export function beforeEach(context) {
     var desc = context.currentTest.fullTitle();
     console.log();
     console.log(desc);
@@ -26,7 +26,7 @@ module.exports.beforeEach = function(context) {
  *
  * @returns {sinon.Sandbox}; remember to call sandbox.restore afterwards.
  */
-module.exports.stubClient = function() {
+export function stubClient() {
     var sandbox = sinon.sandbox.create();
 
     var client = {
@@ -39,11 +39,22 @@ module.exports.stubClient = function() {
         loginFlows: sinon.stub(),
         on: sinon.stub(),
         removeListener: sinon.stub(),
+        isRoomEncrypted: sinon.stub().returns(false),
 
         paginateEventTimeline: sinon.stub().returns(q()),
         sendReadReceipt: sinon.stub().returns(q()),
         getRoomIdForAlias: sinon.stub().returns(q()),
         getProfileInfo: sinon.stub().returns(q({})),
+        getAccountData: (type) => {
+            return mkEvent({
+                type,
+                event: true,
+                content: {},
+            });
+        },
+        setAccountData: sinon.stub(),
+        sendTyping: sinon.stub().returns(q({})),
+        sendHtmlMessage: () => q({}),
     };
 
     // stub out the methods in MatrixClientPeg
@@ -73,7 +84,7 @@ module.exports.stubClient = function() {
  * @param {boolean} opts.event True to make a MatrixEvent.
  * @return {Object} a JSON object representing this event.
  */
-module.exports.mkEvent = function(opts) {
+export function mkEvent(opts) {
     if (!opts.type || !opts.content) {
         throw new Error("Missing .type or .content =>" + JSON.stringify(opts));
     }
@@ -101,7 +112,7 @@ module.exports.mkEvent = function(opts) {
  * @param {Object} opts Values for the presence.
  * @return {Object|MatrixEvent} The event
  */
-module.exports.mkPresence = function(opts) {
+export function mkPresence(opts) {
     if (!opts.user) {
         throw new Error("Missing user");
     }
@@ -132,7 +143,7 @@ module.exports.mkPresence = function(opts) {
  * @param {boolean} opts.event True to make a MatrixEvent.
  * @return {Object|MatrixEvent} The event
  */
-module.exports.mkMembership = function(opts) {
+export function mkMembership(opts) {
     opts.type = "m.room.member";
     if (!opts.skey) {
         opts.skey = opts.user;
@@ -145,7 +156,7 @@ module.exports.mkMembership = function(opts) {
     };
     if (opts.name) { opts.content.displayname = opts.name; }
     if (opts.url) { opts.content.avatar_url = opts.url; }
-    return module.exports.mkEvent(opts);
+    return mkEvent(opts);
 };
 
 /**
@@ -157,7 +168,7 @@ module.exports.mkMembership = function(opts) {
  * @param {boolean} opts.event True to make a MatrixEvent.
  * @return {Object|MatrixEvent} The event
  */
-module.exports.mkMessage = function(opts) {
+export function mkMessage(opts) {
     opts.type = "m.room.message";
     if (!opts.msg) {
         opts.msg = "Random->" + Math.random();
@@ -169,11 +180,12 @@ module.exports.mkMessage = function(opts) {
         msgtype: "m.text",
         body: opts.msg
     };
-    return module.exports.mkEvent(opts);
-};
+    return mkEvent(opts);
+}
 
-module.exports.mkStubRoom = function() {
+export function mkStubRoom(roomId = null) {
     return {
+        roomId,
         getReceiptsForEvent: sinon.stub().returns([]),
         getMember: sinon.stub().returns({}),
         getJoinedMembers: sinon.stub().returns([]),
@@ -182,4 +194,4 @@ module.exports.mkStubRoom = function() {
             members: [],
         },
     };
-};
+}

@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import MatrixClientPeg from './MatrixClientPeg';
+import DMRoomMap from './utils/DMRoomMap';
+import q from 'q';
 
 /**
  * Given a room object, return the alias we should use for it,
@@ -65,13 +68,79 @@ export function looksLikeDirectMessageRoom(room, me) {
         // Used to split rooms via tags
         const tagNames = Object.keys(room.tags);
         // Used for 1:1 direct chats
-        const joinedMembers = room.getJoinedMembers();
+        const members = room.currentState.getMembers();
 
         // Show 1:1 chats in seperate "Direct Messages" section as long as they haven't
         // been moved to a different tag section
-        if (joinedMembers.length === 2 && !tagNames.length) {
+        if (members.length === 2 && !tagNames.length) {
             return true;
         }
     }
     return false;
+}
+
+/**
+ * Marks or unmarks the given room as being as a DM room.
+ * @param {string} roomId The ID of the room to modify
+ * @param {string} userId The user ID of the desired DM
+                   room target user or null to un-mark
+                   this room as a DM room
+ * @returns {object} A promise
+ */
+export function setDMRoom(roomId, userId) {
+    if (MatrixClientPeg.get().isGuest()) {
+        return q();
+    }
+
+    const mDirectEvent = MatrixClientPeg.get().getAccountData('m.direct');
+    let dmRoomMap = {};
+
+    if (mDirectEvent !== undefined) dmRoomMap = mDirectEvent.getContent();
+
+    // remove it from the lists of any others users
+    // (it can only be a DM room for one person)
+    for (const thisUserId of Object.keys(dmRoomMap)) {
+        const roomList = dmRoomMap[thisUserId];
+
+        if (thisUserId != userId) {
+            const indexOfRoom = roomList.indexOf(roomId);
+            if (indexOfRoom > -1) {
+                roomList.splice(indexOfRoom, 1);
+            }
+        }
+    }
+
+    // now add it, if it's not already there
+    if (userId) {
+        const roomList = dmRoomMap[userId] || [];
+        if (roomList.indexOf(roomId) == -1) {
+            roomList.push(roomId);
+        }
+        dmRoomMap[userId] = roomList;
+    }
+
+
+    return MatrixClientPeg.get().setAccountData('m.direct', dmRoomMap);
+}
+
+/**
+ * Given a room, estimate which of its members is likely to
+ * be the target if the room were a DM room and return that user.
+ */
+export function guessDMRoomTarget(room, me) {
+    let oldestTs;
+    let oldestUser;
+
+    // Pick the user who's been here longest (and isn't us)
+    for (const user of room.currentState.getMembers()) {
+        if (user.userId == me.userId) continue;
+
+        if (oldestTs === undefined || user.events.member.getTs() < oldestTs) {
+            oldestUser = user;
+            oldestTs = user.events.member.getTs();
+        }
+    }
+
+    if (oldestUser === undefined) return me;
+    return oldestUser;
 }

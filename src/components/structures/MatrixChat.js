@@ -323,6 +323,20 @@ module.exports = React.createClass({
                     }
                 });
                 break;
+            case 'view_user':
+                // FIXME: ugly hack to expand the RightPanel and then re-dispatch.
+                if (this.state.collapse_rhs) {
+                    setTimeout(()=>{
+                        dis.dispatch({
+                            action: 'show_right_panel',
+                        });
+                        dis.dispatch({
+                            action: 'view_user',
+                            member: payload.member,
+                        });
+                    }, 0);
+                }
+                break;
             case 'view_room':
                 // Takes either a room ID or room alias: if switching to a room the client is already
                 // known to be in (eg. user clicks on a room in the recents panel), supply the ID
@@ -364,11 +378,29 @@ module.exports = React.createClass({
                 //this._setPage(this.PageTypes.CreateRoom);
                 //this.notifyNewScreen('new');
 
-                createRoom().done();
+                var TextInputDialog = sdk.getComponent("dialogs.TextInputDialog");
+                Modal.createDialog(TextInputDialog, {
+                    title: "Create Room",
+                    description: "Room name (optional)",
+                    button: "Create Room",
+                    onFinished: (should_create, name) => {
+                        if (should_create) {
+                            const createOpts = {};
+                            if (name) createOpts.name = name;
+                            createRoom({createOpts}).done();
+                        }
+                    }
+                });
                 break;
             case 'view_room_directory':
                 this._setPage(this.PageTypes.RoomDirectory);
                 this.notifyNewScreen('directory');
+                break;
+            case 'view_create_chat':
+                this._createChat();
+                break;
+            case 'view_invite':
+                this._invite(payload.roomId);
                 break;
             case 'notifier_enabled':
                 this.forceUpdate();
@@ -504,6 +536,23 @@ module.exports = React.createClass({
         if (this.refs.roomView && room_info.showSettings) {
             this.refs.roomView.showSettings(true);
         }
+    },
+
+    _createChat: function() {
+        var ChatInviteDialog = sdk.getComponent("dialogs.ChatInviteDialog");
+        Modal.createDialog(ChatInviteDialog, {
+            title: "Start a new chat",
+        });
+    },
+
+    _invite: function(roomId) {
+        var ChatInviteDialog = sdk.getComponent("dialogs.ChatInviteDialog");
+        Modal.createDialog(ChatInviteDialog, {
+            title: "Invite new room members",
+            button: "Send Invites",
+            description: "Who would you like to add to this room?",
+            roomId: roomId,
+        });
     },
 
     // update scrollStateMap according to the current scroll state of the
@@ -924,7 +973,7 @@ module.exports = React.createClass({
         } catch (e) {
             console.warn("Failed to set badge count: "+e.message);
         }
-        document.title = `Vector ${state === "ERROR" ? " [offline]" : ""}${notifCount > 0 ? ` [${notifCount}]` : ""}`;
+        document.title = `Riot ${state === "ERROR" ? " [offline]" : ""}${notifCount > 0 ? ` [${notifCount}]` : ""}`;
     },
 
     onUserSettingsClose: function() {
@@ -986,43 +1035,50 @@ module.exports = React.createClass({
 
             switch (this.state.page_type) {
                 case this.PageTypes.RoomView:
-                    page_element = (
-                        <RoomView
-                            ref="roomView"
-                            roomAddress={this.state.currentRoomAlias || this.state.currentRoomId}
-                            autoJoin={this.state.autoJoin}
-                            onRoomIdResolved={this.onRoomIdResolved}
-                            eventId={this.state.initialEventId}
-                            thirdPartyInvite={this.state.thirdPartyInvite}
-                            oobData={this.state.roomOobData}
-                            highlightedEventId={this.state.highlightedEventId}
-                            eventPixelOffset={this.state.initialEventPixelOffset}
-                            key={this.state.currentRoomAlias || this.state.currentRoomId}
-                            opacity={this.state.middleOpacity}
-                            ConferenceHandler={this.props.ConferenceHandler} />
-                    );
-                    right_panel = <RightPanel roomId={this.state.currentRoomId} collapsed={this.state.collapse_rhs} opacity={this.state.sideOpacity} />
+                    page_element = <RoomView
+                        ref="roomView"
+                        roomAddress={this.state.currentRoomAlias || this.state.currentRoomId}
+                        autoJoin={this.state.autoJoin}
+                        onRoomIdResolved={this.onRoomIdResolved}
+                        eventId={this.state.initialEventId}
+                        thirdPartyInvite={this.state.thirdPartyInvite}
+                        oobData={this.state.roomOobData}
+                        highlightedEventId={this.state.highlightedEventId}
+                        eventPixelOffset={this.state.initialEventPixelOffset}
+                        key={this.state.currentRoomAlias || this.state.currentRoomId}
+                        opacity={this.state.middleOpacity}
+                        collapsedRhs={ this.state.collapse_rhs }
+                        ConferenceHandler={this.props.ConferenceHandler}
+                    />
+                    if (!this.state.collapse_rhs) right_panel = <RightPanel roomId={this.state.currentRoomId} opacity={this.state.sideOpacity} />
                     break;
                 case this.PageTypes.UserSettings:
                     page_element = <UserSettings
                         onClose={this.onUserSettingsClose}
                         version={this.state.version}
                         brand={this.props.config.brand}
+                        collapsedRhs={ this.state.collapse_rhs }
                         enableLabs={this.props.config.enableLabs}
                     />
-                    right_panel = <RightPanel collapsed={this.state.collapse_rhs} opacity={this.state.sideOpacity}/>
+                    if (!this.state.collapse_rhs) right_panel = <RightPanel opacity={this.state.sideOpacity}/>
                     break;
                 case this.PageTypes.CreateRoom:
-                    page_element = <CreateRoom onRoomCreated={this.onRoomCreated}/>
-                    right_panel = <RightPanel collapsed={this.state.collapse_rhs} opacity={this.state.sideOpacity}/>
+                    page_element = <CreateRoom
+                        onRoomCreated={this.onRoomCreated}
+                        collapsedRhs={ this.state.collapse_rhs }
+                    />
+                    if (!this.state.collapse_rhs) right_panel = <RightPanel opacity={this.state.sideOpacity}/>
                     break;
                 case this.PageTypes.RoomDirectory:
-                    page_element = <RoomDirectory />
-                    right_panel = <RightPanel collapsed={this.state.collapse_rhs} opacity={this.state.sideOpacity}/>
+                    page_element = <RoomDirectory
+                        collapsedRhs={ this.state.collapse_rhs }
+                        config={this.props.config.roomDirectory}
+                    />
+                    if (!this.state.collapse_rhs) right_panel = <RightPanel opacity={this.state.sideOpacity}/>
                     break;
                 case this.PageTypes.UserView:
                     page_element = null; // deliberately null for now
-                    right_panel = <RightPanel userId={this.state.viewUserId} collapsed={false} opacity={this.state.sideOpacity} />
+                    right_panel = <RightPanel userId={this.state.viewUserId} opacity={this.state.sideOpacity} />
                     break;
             }
 

@@ -17,6 +17,8 @@ limitations under the License.
 var MatrixClientPeg = require("./MatrixClientPeg");
 var dis = require("./dispatcher");
 var Tinter = require("./Tinter");
+import sdk from './index';
+import Modal from './Modal';
 
 
 class Command {
@@ -56,6 +58,16 @@ var success = function(promise) {
 };
 
 var commands = {
+    ddg: new Command("ddg", "<query>", function(roomId, args) {
+        const ErrorDialog = sdk.getComponent('dialogs.ErrorDialog');
+        // TODO Don't explain this away, actually show a search UI here.
+        Modal.createDialog(ErrorDialog, {
+            title: "/ddg is not a command",
+            description: "To use it, just wait for autocomplete results to load and tab through them.",
+        });
+        return success();
+    }),
+
     // Change your nickname
     nick: new Command("nick", "<display_name>", function(room_id, args) {
         if (args) {
@@ -292,7 +304,7 @@ module.exports = {
         // IRC-style commands
         input = input.replace(/\s+$/, "");
         if (input[0] === "/" && input[1] !== "/") {
-            var bits = input.match(/^(\S+?)( +(.*))?$/);
+            var bits = input.match(/^(\S+?)( +((.|\n)*))?$/);
             var cmd, args;
             if (bits) {
                 cmd = bits[1].substring(1).toLowerCase();

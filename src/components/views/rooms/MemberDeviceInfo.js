@@ -15,98 +15,48 @@ limitations under the License.
 */
 
 import React from 'react';
-import MatrixClientPeg from '../../../MatrixClientPeg';
+import sdk from '../../../index';
 
 export default class MemberDeviceInfo extends React.Component {
-    constructor(props) {
-        super(props);
-        this.onVerifyClick = this.onVerifyClick.bind(this);
-        this.onUnverifyClick = this.onUnverifyClick.bind(this);
-        this.onBlockClick = this.onBlockClick.bind(this);
-        this.onUnblockClick = this.onUnblockClick.bind(this);
-    }
-
-    onVerifyClick() {
-        MatrixClientPeg.get().setDeviceVerified(
-            this.props.userId, this.props.device.deviceId, true
-        );
-    }
-
-    onUnverifyClick() {
-        MatrixClientPeg.get().setDeviceVerified(
-            this.props.userId, this.props.device.deviceId, false
-        );
-    }
-
-    onBlockClick() {
-        MatrixClientPeg.get().setDeviceBlocked(
-            this.props.userId, this.props.device.deviceId, true
-        );
-    }
-
-    onUnblockClick() {
-        MatrixClientPeg.get().setDeviceBlocked(
-            this.props.userId, this.props.device.deviceId, false
-        );
-    }
-
     render() {
-        var indicator = null, blockButton = null, verifyButton = null;
-        if (this.props.device.isBlocked()) {
-            blockButton = (
-                <div className="mx_MemberDeviceInfo_textButton mx_MemberDeviceInfo_unblock"
-                  onClick={this.onUnblockClick}>
-                    Unblock
-                </div>
-            );
-        } else {
-            blockButton = (
-                <div className="mx_MemberDeviceInfo_textButton mx_MemberDeviceInfo_block"
-                  onClick={this.onBlockClick}>
-                    Block
-                </div>
-            );
-        }
-
-        if (this.props.device.isVerified()) {
-            verifyButton = (
-                <div className="mx_MemberDeviceInfo_textButton mx_MemberDeviceInfo_unverify"
-                  onClick={this.onUnverifyClick}>
-                    Unverify
-                </div>
-            );
-        } else {
-            verifyButton = (
-                <div className="mx_MemberDeviceInfo_textButton mx_MemberDeviceInfo_verify"
-                  onClick={this.onVerifyClick}>
-                    Verify
-                </div>
-            );
-        }
+        var indicator = null;
+        var DeviceVerifyButtons = sdk.getComponent('elements.DeviceVerifyButtons');
 
         if (this.props.device.isBlocked()) {
             indicator = (
-                <div className="mx_MemberDeviceInfo_blocked">Blocked</div>
+                    <div className="mx_MemberDeviceInfo_blocked">
+                    <img src="img/e2e-blocked.svg" width="12" height="12" style={{ marginLeft: "-1px" }} alt="Blocked"/>
+                    </div>
             );
         } else if (this.props.device.isVerified()) {
             indicator = (
-                    <div className="mx_MemberDeviceInfo_verified">Verified</div>
+                    <div className="mx_MemberDeviceInfo_verified">
+                    <img src="img/e2e-verified.svg" width="10" height="12" alt="Verified"/>
+                    </div>
             );
-
         } else {
             indicator = (
-                <div className="mx_MemberDeviceInfo_unverified">Unverified</div>
+                    <div className="mx_MemberDeviceInfo_unverified">
+                    <img src="img/e2e-warning.svg" width="15" height="12" style={{ marginLeft: "-2px" }} alt="Unverified"/>
+                    </div>
             );
         }
 
-        var deviceName = this.props.device.display_name || this.props.device.deviceId;
+        var deviceName = this.props.device.ambiguous ?
+            (this.props.device.getDisplayName() ? this.props.device.getDisplayName() : "") + " (" + this.props.device.deviceId + ")" :
+            this.props.device.getDisplayName();
 
+        // add the deviceId as a titletext to help with debugging
         return (
-            <div className="mx_MemberDeviceInfo">
-                <div className="mx_MemberDeviceInfo_deviceId">{deviceName}</div>
-                {indicator}
-                {verifyButton}
-                {blockButton}
+            <div className="mx_MemberDeviceInfo"
+                    title={"device id: " + this.props.device.deviceId} >
+                <div className="mx_MemberDeviceInfo_deviceInfo">
+                    <div className="mx_MemberDeviceInfo_deviceId">
+                        {deviceName}
+                        {indicator}
+                    </div>
+                </div>
+                <DeviceVerifyButtons userId={this.props.userId} device={this.props.device} />
             </div>
         );
     }

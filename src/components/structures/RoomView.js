@@ -36,6 +36,7 @@ var dis = require("../../dispatcher");
 var Tinter = require("../../Tinter");
 var rate_limited_func = require('../../ratelimitedfunc');
 var ObjectUtils = require('../../ObjectUtils');
+var Rooms = require('../../Rooms');
 
 import UserProvider from '../../autocomplete/UserProvider';
 
@@ -96,7 +97,7 @@ module.exports = React.createClass({
         highlightedEventId: React.PropTypes.string,
 
         // is the RightPanel collapsed?
-        rightPanelCollapsed: React.PropTypes.bool,
+        collapsedRhs: React.PropTypes.bool,
     },
 
     getInitialState: function() {
@@ -340,7 +341,11 @@ module.exports = React.createClass({
         if (this.unmounted) return;
 
         // ignore events for other rooms
+        if (!room) return;
         if (!this.state.room || room.roomId != this.state.room.roomId) return;
+
+        // ignore events from filtered timelines
+        if (data.timeline.getTimelineSet() !== room.getUnfilteredTimelineSet()) return;
 
         if (ev.getType() === "org.matrix.room.preview_urls") {
             this._updatePreviewUrlVisibility(room);
@@ -446,6 +451,7 @@ module.exports = React.createClass({
                 room: room,
                 joining: false,
             });
+
             this._onRoomLoaded(room);
         }
     },
@@ -515,6 +521,17 @@ module.exports = React.createClass({
         // into.
         var me = MatrixClientPeg.get().credentials.userId;
         if (this.state.joining && this.state.room.hasMembershipState(me, "join")) {
+            // Having just joined a room, check to see if it looks like a DM room, and if so,
+            // mark it as one. This is to work around the fact that some clients don't support
+            // is_direct. We should remove this once they do.
+            const me = this.state.room.getMember(MatrixClientPeg.get().credentials.userId);
+            if (Rooms.looksLikeDirectMessageRoom(this.state.room, me)) {
+                // XXX: There's not a whole lot we can really do if this fails: at best
+                // perhaps we could try a couple more times, but since it's a temporary
+                // compatability workaround, let's not bother.
+                Rooms.setDMRoom(this.state.room.roomId, me.events.member.getSender()).done();
+            }
+
             this.setState({
                 joining: false
             });
@@ -670,6 +687,20 @@ module.exports = React.createClass({
         }
 
         display_name_promise.then(() => {
+            // if this is an invite and has the 'direct' hint set, mark it as a DM room now.
+            if (this.state.room) {
+                const me = this.state.room.getMember(MatrixClientPeg.get().credentials.userId);
+                if (me && me.membership == 'invite') {
+                    if (me.events.member.getContent().is_direct) {
+                        // The 'direct' hint is there, so declare that this is a DM room for
+                        // whoever invited us.
+                        return Rooms.setDMRoom(this.state.room.roomId, me.events.member.getSender());
+                    }
+                }
+            }
+
+            return q();
+        }).then(() => {
             var sign_url = this.props.thirdPartyInvite ? this.props.thirdPartyInvite.inviteSignUrl : undefined;
             return MatrixClientPeg.get().joinRoom(this.props.roomAddress,
                                                   { inviteSignUrl: sign_url } )
@@ -1355,7 +1386,7 @@ module.exports = React.createClass({
                             <RoomHeader ref="header"
                                 room={this.state.room}
                                 oobData={this.props.oobData}
-                                rightPanelCollapsed={ this.props.rightPanelCollapsed }
+                                collapsedRhs={ this.props.collapsedRhs }
                             />
                             <div className="mx_RoomView_auxPanel">
                                 <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked }
@@ -1394,7 +1425,11 @@ module.exports = React.createClass({
                 // We have a regular invite for this room.
                 return (
                     <div className="mx_RoomView">
-                        <RoomHeader ref="header" room={this.state.room}/>
+                        <RoomHeader
+                            ref="header"
+                            room={this.state.room}
+                            collapsedRhs={ this.props.collapsedRhs }
+                        />
                         <div className="mx_RoomView_auxPanel">
                             <RoomPreviewBar onJoinClick={ this.onJoinButtonClicked }
                                             onRejectClick={ this.onRejectButtonClicked }
@@ -1570,7 +1605,9 @@ module.exports = React.createClass({
 
         var messagePanel = (
             <TimelinePanel ref={this._gatherTimelinePanelRef}
-                room={this.state.room}
+                timelineSet={this.state.room.getUnfilteredTimelineSet()}
+                manageReadReceipts={true}
+                manageReadMarkers={true}
                 hidden={hideMessagePanel}
                 highlightedEventId={this.props.highlightedEventId}
                 eventId={this.props.eventId}
@@ -1579,6 +1616,7 @@ module.exports = React.createClass({
                 onReadMarkerUpdated={ this._updateTopUnreadMessagesBar }
                 showUrlPreview = { this.state.showUrlPreview }
                 opacity={ this.props.opacity }
+                className="mx_RoomView_messagePanel"
             />);
 
         var topUnreadMessagesBar = null;
@@ -1600,6 +1638,7 @@ module.exports = React.createClass({
                     oobData={this.props.oobData}
                     editing={this.state.editingRoomSettings}
                     saving={this.state.uploadingRoomSettings}
+                    collapsedRhs={ this.props.collapsedRhs }
                     onSearchClick={this.onSearchClick}
                     onSettingsClick={this.onSettingsClick}
                     onSaveClick={this.onSettingsSaveClick}

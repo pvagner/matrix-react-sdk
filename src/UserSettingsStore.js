@@ -24,6 +24,23 @@ var Notifier = require("./Notifier");
  */
 
 module.exports = {
+    LABS_FEATURES: [
+        {
+            name: 'Rich Text Editor',
+            id: 'rich_text_editor',
+            default: false,
+        },
+        {
+            name: 'End-to-End Encryption',
+            id: 'e2e_encryption',
+            default: true,
+        },
+        {
+            name: 'Integration Management',
+            id: 'integration_management',
+            default: true,
+        },
+    ],
 
     loadProfileInfo: function() {
         var cli = MatrixClientPeg.get();
@@ -130,9 +147,9 @@ module.exports = {
         return event ? event.getContent() : {};
     },
 
-    getSyncedSetting: function(type) {
+    getSyncedSetting: function(type, defaultValue = null) {
         var settings = this.getSyncedSettings();
-        return settings[type];
+        return settings.hasOwnProperty(type) ? settings[type] : null;
     },
 
     setSyncedSetting: function(type, value) {
@@ -143,6 +160,17 @@ module.exports = {
     },
 
     isFeatureEnabled: function(feature: string): boolean {
+        // Disable labs for guests.
+        if (MatrixClientPeg.get().isGuest()) return false;
+
+        if (localStorage.getItem(`mx_labs_feature_${feature}`) === null) {
+            for (var i = 0; i < this.LABS_FEATURES.length; i++) {
+                var f = this.LABS_FEATURES[i];
+                if (f.id === feature) {
+                    return f.default;
+                }
+            }
+        }
         return localStorage.getItem(`mx_labs_feature_${feature}`) === 'true';
     },
 
