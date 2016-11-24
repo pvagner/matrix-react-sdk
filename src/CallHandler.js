@@ -264,11 +264,23 @@ function _onAction(payload) {
                     description: "You cannot place VoIP calls in this browser."
                 });
             }
+            else if (MatrixClientPeg.get().isRoomEncrypted(payload.room_id)) {
+                // Conference calls are implemented by sending the media to central
+                // server which combines the audio from all the participants together
+                // into a single stream. This is incompatible with end-to-end encryption
+                // because a central server would be decrypting the audio for each
+                // participant.
+                // Therefore we disable conference calling in E2E rooms.
+                const ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
+                Modal.createDialog(ErrorDialog, {
+                    description: "Conference calls are not supported in encrypted rooms",
+                });
+            }
             else {
                 var QuestionDialog = sdk.getComponent("dialogs.QuestionDialog");
                 Modal.createDialog(QuestionDialog, {
                     title: "Warning!",
-                    description: "Conference calling in Vector is in development and may not be reliable.",
+                    description: "Conference calling in Riot is in development and may not be reliable.",
                     onFinished: confirm=>{
                         if (confirm) {
                             ConferenceHandler.createNewMatrixCall(

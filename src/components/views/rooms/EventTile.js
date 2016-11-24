@@ -21,8 +21,8 @@ var classNames = require("classnames");
 var Modal = require('../../../Modal');
 
 var sdk = require('../../../index');
-var MatrixClientPeg = require('../../../MatrixClientPeg')
 var TextForEvent = require('../../../TextForEvent');
+import WithMatrixClient from '../../../wrappers/WithMatrixClient';
 
 var ContextualMenu = require('../../structures/ContextualMenu');
 var dispatcher = require("../../../dispatcher");
@@ -63,22 +63,13 @@ var MAX_READ_AVATARS = 5;
 // |    '--------------------------------------'              |
 // '----------------------------------------------------------'
 
-module.exports = React.createClass({
+module.exports = WithMatrixClient(React.createClass({
     displayName: 'EventTile',
 
-    statics: {
-        haveTileForEvent: function(e) {
-            if (e.isRedacted()) return false;
-            if (eventTileTypes[e.getType()] == undefined) return false;
-            if (eventTileTypes[e.getType()] == 'messages.TextualEvent') {
-                return TextForEvent.textForEvent(e) !== '';
-            } else {
-                return true;
-            }
-        }
-    },
-
     propTypes: {
+        /* MatrixClient instance for sender verification etc */
+        matrixClient: React.PropTypes.object.isRequired,
+
         /* the MatrixEvent to show */
         mxEvent: React.PropTypes.object.isRequired,
 
@@ -153,8 +144,9 @@ module.exports = React.createClass({
 
     componentDidMount: function() {
         this._suppressReadReceiptAnimation = false;
-        MatrixClientPeg.get().on("deviceVerificationChanged",
+        this.props.matrixClient.on("deviceVerificationChanged",
                                  this.onDeviceVerificationChanged);
+        this.props.mxEvent.on("Event.decrypted", this._onDecrypted);
     },
 
     componentWillReceiveProps: function (nextProps) {
@@ -176,11 +168,18 @@ module.exports = React.createClass({
     },
 
     componentWillUnmount: function() {
-        var client = MatrixClientPeg.get();
-        if (client) {
-            client.removeListener("deviceVerificationChanged",
-                                  this.onDeviceVerificationChanged);
-        }
+        var client = this.props.matrixClient;
+        client.removeListener("deviceVerificationChanged",
+                              this.onDeviceVerificationChanged);
+        this.props.mxEvent.removeListener("Event.decrypted", this._onDecrypted);
+    },
+
+    /** called when the event is decrypted after we show it.
+     */
+    _onDecrypted: function() {
+        // we need to re-verify the sending device.
+        this._verifyEvent(this.props.mxEvent);
+        this.forceUpdate();
     },
 
     onDeviceVerificationChanged: function(userId, device) {
@@ -193,7 +192,7 @@ module.exports = React.createClass({
         var verified = null;
 
         if (mxEvent.isEncrypted()) {
-            verified = MatrixClientPeg.get().isEventSenderVerified(mxEvent);
+            verified = this.props.matrixClient.isEventSenderVerified(mxEvent);
         }
 
         this.setState({
@@ -246,11 +245,11 @@ module.exports = React.createClass({
     },
 
     shouldHighlight: function() {
-        var actions = MatrixClientPeg.get().getPushActionsForEvent(this.props.mxEvent);
+        var actions = this.props.matrixClient.getPushActionsForEvent(this.props.mxEvent);
         if (!actions || !actions.tweaks) { return false; }
 
         // don't show self-highlights from another of our clients
-        if (this.props.mxEvent.getSender() === MatrixClientPeg.get().credentials.userId)
+        if (this.props.mxEvent.getSender() === this.props.matrixClient.credentials.userId)
         {
             return false;
         }
@@ -348,13 +347,6 @@ module.exports = React.createClass({
         </span>;
     },
 
-    onMemberAvatarClick: function(event) {
-        dispatcher.dispatch({
-            action: 'view_user',
-            member: this.props.mxEvent.sender,
-        });
-    },
-
     onSenderProfileClick: function(event) {
         var mxEvent = this.props.mxEvent;
         dispatcher.dispatch({
@@ -394,7 +386,7 @@ module.exports = React.createClass({
             throw new Error("Event type not supported");
         }
 
-        var e2eEnabled = MatrixClientPeg.get().isRoomEncrypted(this.props.mxEvent.getRoomId());
+        var e2eEnabled = this.props.matrixClient.isRoomEncrypted(this.props.mxEvent.getRoomId());
         var isSending = (['sending', 'queued', 'encrypting'].indexOf(this.props.eventSendStatus) !== -1);
 
         var classes = classNames({
@@ -443,7 +435,7 @@ module.exports = React.createClass({
                     <div className="mx_EventTile_avatar">
                         <MemberAvatar member={this.props.mxEvent.sender}
                             width={avatarSize} height={avatarSize}
-                            onClick={ this.onMemberAvatarClick }
+                            viewUserOnClick={true}
                         />
                     </div>
             );
@@ -488,7 +480,7 @@ module.exports = React.createClass({
         }
 
         if (this.props.tileShape === "notif") {
-            var room = MatrixClientPeg.get().getRoom(this.props.mxEvent.getRoomId());
+            var room = this.props.matrixClient.getRoom(this.props.mxEvent.getRoomId());
 
             return (
                 <div className={classes}>
@@ -561,4 +553,14 @@ module.exports = React.createClass({
             );
         }
     },
-});
+}));
+
+module.exports.haveTileForEvent = function(e) {
+    if (e.isRedacted()) return false;
+    if (eventTileTypes[e.getType()] == undefined) return false;
+    if (eventTileTypes[e.getType()] == 'messages.TextualEvent') {
+        return TextForEvent.textForEvent(e) !== '';
+    } else {
+        return true;
+    }
+};

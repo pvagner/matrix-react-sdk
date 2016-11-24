@@ -22,6 +22,9 @@ function matrixLinkify(linkify) {
     var MultiToken = MT.Base;
     var S_START = linkify.parser.start;
 
+    if (TT.UNDERSCORE === undefined) {
+        throw new Error("linkify-matrix requires linkifyjs 2.1.1: this version is too old.");
+    }
 
     var ROOMALIAS = function(value) {
         MultiToken.call(this, value);
@@ -123,6 +126,7 @@ matrixLinkify.VECTOR_URL_PATTERN = "^(?:https?:\/\/)?(?:"
     + ")(#.*)";
 
 matrixLinkify.MATRIXTO_URL_PATTERN = "^(?:https?:\/\/)?(?:www\\.)?matrix\\.to/#/((#|@|!).*)";
+matrixLinkify.MATRIXTO_BASE_URL= "https://matrix.to";
 
 matrixLinkify.options = {
     events: function (href, type) {
@@ -145,9 +149,8 @@ matrixLinkify.options = {
     formatHref: function (href, type) {
         switch (type) {
             case 'roomalias':
-                return '#/room/' + href;
             case 'userid':
-                return '#/user/' + href;
+                return matrixLinkify.MATRIXTO_BASE_URL + '/#/' + href;
             default:
                 var m;
                 // FIXME: horrible duplication with HtmlUtils' transform tags

@@ -1,3 +1,147 @@
+Changes in [0.8.0](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.8.0) (2016-11-19)
+===================================================================================================
+[Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.5...v0.8.0)
+
+ * Fix more membership change collapsing bugs
+   [\#560](https://github.com/matrix-org/matrix-react-sdk/pull/560)
+ * Show an open padlock for unencrypted rooms
+   [\#557](https://github.com/matrix-org/matrix-react-sdk/pull/557)
+ * Clean up MFileBody.presentableTextForFile
+   [\#558](https://github.com/matrix-org/matrix-react-sdk/pull/558)
+ * Update eventtiles when the events are decrypted
+   [\#556](https://github.com/matrix-org/matrix-react-sdk/pull/556)
+ * Update EventTile to use WithMatrixClient instead of MatrixClientPeg
+   [\#552](https://github.com/matrix-org/matrix-react-sdk/pull/552)
+ * Disable conference calling for encrypted rooms
+   [\#549](https://github.com/matrix-org/matrix-react-sdk/pull/549)
+ * Encrypt attachments in encrypted rooms
+   [\#548](https://github.com/matrix-org/matrix-react-sdk/pull/548)
+ * Fix MemberAvatar PropTypes & MemberEventListSummary key
+   [\#547](https://github.com/matrix-org/matrix-react-sdk/pull/547)
+ * Revert "Encrypt attachments in encrypted rooms,"
+   [\#546](https://github.com/matrix-org/matrix-react-sdk/pull/546)
+ * Fix the vector web version in UserSettings
+   [\#542](https://github.com/matrix-org/matrix-react-sdk/pull/542)
+ * Truncate consecutive member events
+   [\#544](https://github.com/matrix-org/matrix-react-sdk/pull/544)
+ * Encrypt attachments in encrypted rooms,
+   [\#533](https://github.com/matrix-org/matrix-react-sdk/pull/533)
+ * Fix the ctrl+e mute camera shortcut
+   [\#545](https://github.com/matrix-org/matrix-react-sdk/pull/545)
+ * Show the error that occured when trying to reach scalar
+   [\#543](https://github.com/matrix-org/matrix-react-sdk/pull/543)
+ * Don't do URL previews for matrix.to
+   [\#541](https://github.com/matrix-org/matrix-react-sdk/pull/541)
+ * Fix NPE in LoggedInView
+   [\#540](https://github.com/matrix-org/matrix-react-sdk/pull/540)
+ * Make room alias & user ID links matrix.to links
+   [\#538](https://github.com/matrix-org/matrix-react-sdk/pull/538)
+ * Make MemberInfo use the matrixclient from the context
+   [\#537](https://github.com/matrix-org/matrix-react-sdk/pull/537)
+ * Add the MatrixClient to the react context
+   [\#536](https://github.com/matrix-org/matrix-react-sdk/pull/536)
+ * Factor out LoggedInView from MatrixChat
+   [\#535](https://github.com/matrix-org/matrix-react-sdk/pull/535)
+ * Move 'new version' support into Platform
+   [\#532](https://github.com/matrix-org/matrix-react-sdk/pull/532)
+ * Move Notifications into Platform
+   [\#534](https://github.com/matrix-org/matrix-react-sdk/pull/534)
+ * Move platform-specific functionality into Platform
+   [\#531](https://github.com/matrix-org/matrix-react-sdk/pull/531)
+
+Changes in [0.7.5](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.7.5) (2016-11-04)
+===================================================================================================
+[Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.5-rc.1...v0.7.5)
+
+ * No changes
+
+Changes in [0.7.5-rc.1](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.7.5-rc.1) (2016-11-02)
+=============================================================================================================
+[Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.4...v0.7.5-rc.1)
+
+ * Explicitly list files in package.json
+   [\#530](https://github.com/matrix-org/matrix-react-sdk/pull/530)
+ * Fix some markdown in the code style doc
+   [\#529](https://github.com/matrix-org/matrix-react-sdk/pull/529)
+ * Run highlight.js asynchronously
+   [\#527](https://github.com/matrix-org/matrix-react-sdk/pull/527)
+ * Fix room tinting
+   [\#528](https://github.com/matrix-org/matrix-react-sdk/pull/528)
+ * Fix CPU spin on joining rooms
+   [\#525](https://github.com/matrix-org/matrix-react-sdk/pull/525)
+ * Don't send read receipt if user has logged out
+   [\#526](https://github.com/matrix-org/matrix-react-sdk/pull/526)
+ * Switch to babel 6, again
+   [\#523](https://github.com/matrix-org/matrix-react-sdk/pull/523)
+ * Keyboard shortcuts to mute microphone/camera
+   [\#522](https://github.com/matrix-org/matrix-react-sdk/pull/522)
+ * Give our input fields names
+   [\#520](https://github.com/matrix-org/matrix-react-sdk/pull/520)
+ * Revert "Switch to babel 6"
+   [\#521](https://github.com/matrix-org/matrix-react-sdk/pull/521)
+ * Switch to babel 6
+   [\#519](https://github.com/matrix-org/matrix-react-sdk/pull/519)
+ * Interactive auth for device delete
+   [\#517](https://github.com/matrix-org/matrix-react-sdk/pull/517)
+ * InteractiveAuthDialog
+   [\#516](https://github.com/matrix-org/matrix-react-sdk/pull/516)
+ * Prevent spamming emails by reusing client secret
+   [\#514](https://github.com/matrix-org/matrix-react-sdk/pull/514)
+ * Refactor CaptchaForm to put less logic in signupstages
+   [\#515](https://github.com/matrix-org/matrix-react-sdk/pull/515)
+
+Changes in [0.7.4](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.7.4) (2016-10-12)
+===================================================================================================
+[Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.3...v0.7.4)
+
+ * A bundle of fixes to the react tests
+   [\#513](https://github.com/matrix-org/matrix-react-sdk/pull/513)
+ * Fix registration retry
+   [\#512](https://github.com/matrix-org/matrix-react-sdk/pull/512)
+ * Fix registration
+   [\#511](https://github.com/matrix-org/matrix-react-sdk/pull/511)
+ * Fix bug where riot would keep requesting tokens
+   [\#510](https://github.com/matrix-org/matrix-react-sdk/pull/510)
+
+Changes in [0.7.3](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.7.3) (2016-10-05)
+===================================================================================================
+[Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.2...v0.7.3)
+
+ * Move 'show join button' functionality out
+   [\#502](https://github.com/matrix-org/matrix-react-sdk/pull/502)
+ * Update to linkify 2.1.3
+   [\#508](https://github.com/matrix-org/matrix-react-sdk/pull/508)
+ * Fix version going blank after logging in
+   [\#505](https://github.com/matrix-org/matrix-react-sdk/pull/505)
+ * Use 'Sign In' / 'Sign Out' universally
+   [\#506](https://github.com/matrix-org/matrix-react-sdk/pull/506)
+ * Prevent error when clicking 'log in'
+   [\#504](https://github.com/matrix-org/matrix-react-sdk/pull/504)
+ * Make RTE mode use the new Markdown wrapper class
+   [\#497](https://github.com/matrix-org/matrix-react-sdk/pull/497)
+ * Add 'getHomeServerName' util to client peg
+   [\#501](https://github.com/matrix-org/matrix-react-sdk/pull/501)
+ * Fix markdown link syntax
+   [\#499](https://github.com/matrix-org/matrix-react-sdk/pull/499)
+ * Fail hard & fast if linkifyjs version is wrong
+   [\#500](https://github.com/matrix-org/matrix-react-sdk/pull/500)
+ * Bring back the little green men without slowness
+   [\#498](https://github.com/matrix-org/matrix-react-sdk/pull/498)
+ * Directory search join button
+   [\#496](https://github.com/matrix-org/matrix-react-sdk/pull/496)
+ * Fix links to IRC rooms
+   [\#495](https://github.com/matrix-org/matrix-react-sdk/pull/495)
+ * Make markdown less aggressive
+   [\#492](https://github.com/matrix-org/matrix-react-sdk/pull/492)
+ * Move the device verification buttons to their own class
+   [\#493](https://github.com/matrix-org/matrix-react-sdk/pull/493)
+ * Add the deviceId back to memberdeviceinfo
+   [\#494](https://github.com/matrix-org/matrix-react-sdk/pull/494)
+ * Force-hide autocomplete after sending message.
+   [\#489](https://github.com/matrix-org/matrix-react-sdk/pull/489)
+ * force old selection state after creating entities
+   [\#488](https://github.com/matrix-org/matrix-react-sdk/pull/488)
+
 Changes in [0.7.2](https://github.com/matrix-org/matrix-react-sdk/releases/tag/v0.7.2) (2016-09-21)
 ===================================================================================================
 [Full Changelog](https://github.com/matrix-org/matrix-react-sdk/compare/v0.7.1...v0.7.2)

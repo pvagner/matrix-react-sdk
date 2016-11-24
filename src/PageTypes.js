@@ -1,5 +1,5 @@
 /*
-Copyright 2016 OpenMarket Ltd
+Copyright 2015, 2016 OpenMarket Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,21 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/* a selection of key codes, as used in KeyboardEvent.keyCode */
-module.exports = {
-    BACKSPACE: 8,
-    TAB: 9,
-    ENTER: 13,
-    SHIFT: 16,
-    PAGE_UP: 33,
-    PAGE_DOWN: 34,
-    END: 35,
-    HOME: 36,
-    LEFT: 37,
-    UP: 38,
-    RIGHT: 39,
-    DOWN: 40,
-    DELETE: 46,
-    KEY_D: 68,
-    KEY_E: 69,
+/** The types of page which can be shown by the LoggedInView */
+export default {
+    RoomView: "room_view",
+    UserSettings: "user_settings",
+    CreateRoom: "create_room",
+    RoomDirectory: "room_directory",
+    UserView: "user_view",
 };

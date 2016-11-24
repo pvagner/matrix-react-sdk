@@ -229,6 +229,8 @@ module.exports = React.createClass({
 
     _getEventTiles: function() {
         var EventTile = sdk.getComponent('rooms.EventTile');
+        var DateSeparator = sdk.getComponent('messages.DateSeparator');
+        const MemberEventListSummary = sdk.getComponent('views.elements.MemberEventListSummary');
 
         this.eventNodes = {};
 
@@ -275,6 +277,11 @@ module.exports = React.createClass({
             this.currentGhostEventId = null;
         }
 
+        var isMembershipChange = (e) =>
+            e.getType() === 'm.room.member'
+            && ['join', 'leave'].indexOf(e.getContent().membership) !== -1
+            && (!e.getPrevContent() || e.getContent().membership  !== e.getPrevContent().membership);
+
         for (i = 0; i < this.props.events.length; i++) {
             var mxEv = this.props.events[i];
             var wantTile = true;
@@ -285,6 +292,54 @@ module.exports = React.createClass({
             }
 
             var last = (i == lastShownEventIndex);
+
+            // Wrap consecutive member events in a ListSummary
+            if (isMembershipChange(mxEv)) {
+                let ts1 = mxEv.getTs();
+
+                if (this._wantsDateSeparator(prevEvent, ts1)) {
+                    let dateSeparator = <li key={ts1+'~'}><DateSeparator key={ts1+'~'} ts={ts1}/></li>;
+                    ret.push(dateSeparator);
+                }
+
+                let summarisedEvents = [mxEv];
+                for (;i + 1 < this.props.events.length; i++) {
+                    let collapsedMxEv = this.props.events[i + 1];
+
+                    if (!isMembershipChange(collapsedMxEv) ||
+                        this._wantsDateSeparator(this.props.events[i], collapsedMxEv.getTs())) {
+                        break;
+                    }
+                    summarisedEvents.push(collapsedMxEv);
+                }
+                // At this point, i = the index of the last event in the summary sequence
+
+                let eventTiles = summarisedEvents.map(
+                    (e) => {
+                        // In order to prevent DateSeparators from appearing in the expanded form
+                        // of MemberEventListSummary, render each member event as if the previous
+                        // one was itself. This way, the timestamp of the previous event === the
+                        // timestamp of the current event, and no DateSeperator is inserted.
+                        let ret = this._getTilesForEvent(e, e);
+                        prevEvent = e;
+                        return ret;
+                    }
+                ).reduce((a,b) => a.concat(b));
+
+                if (eventTiles.length === 0) {
+                    eventTiles = null;
+                }
+
+                ret.push(
+                    <MemberEventListSummary
+                        key={mxEv.getId()}
+                        events={summarisedEvents}
+                        data-scroll-token={eventId}>
+                            {eventTiles}
+                    </MemberEventListSummary>
+                );
+                continue;
+            }
 
             if (wantTile) {
                 // make sure we unpack the array returned by _getTilesForEvent,
@@ -522,6 +577,7 @@ module.exports = React.createClass({
                     onScroll={ this.props.onScroll }
                     onResize={ this.onResize }
                     onFillRequest={ this.props.onFillRequest }
+                    onUnfillRequest={ this.props.onUnfillRequest }
                     style={ style }
                     stickyBottom={ this.props.stickyBottom }>
                 {topSpinner}

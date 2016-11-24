@@ -18,6 +18,7 @@ limitations under the License.
 
 var React = require('react');
 var ReactDOM = require('react-dom');
+var highlight = require('highlight.js');
 var HtmlUtils = require('../../../HtmlUtils');
 var linkify = require('linkifyjs');
 var linkifyElement = require('linkifyjs/element');
@@ -26,7 +27,6 @@ var sdk = require('../../../index');
 var ScalarAuthClient = require("../../../ScalarAuthClient");
 var Modal = require("../../../Modal");
 var SdkConfig = require('../../../SdkConfig');
-var UserSettingsStore = require('../../../UserSettingsStore');
 
 linkifyMatrix(linkify);
 
@@ -62,15 +62,32 @@ module.exports = React.createClass({
     },
 
     componentDidMount: function() {
+        this._unmounted = false;
+
         linkifyElement(this.refs.content, linkifyMatrix.options);
         this.calculateUrlPreview();
 
-        if (this.props.mxEvent.getContent().format === "org.matrix.custom.html")
-            HtmlUtils.highlightDom(ReactDOM.findDOMNode(this));
+        if (this.props.mxEvent.getContent().format === "org.matrix.custom.html") {
+            const blocks = ReactDOM.findDOMNode(this).getElementsByTagName("code");
+            if (blocks.length > 0) {
+                // Do this asynchronously: parsing code takes time and we don't
+                // need to block the DOM update on it.
+                setTimeout(() => {
+                    if (this._unmounted) return;
+                    for (let i = 0; i < blocks.length; i++) {
+                        highlight.highlightBlock(blocks[i]);
+                    }
+                }, 10);
+            }
+        }
     },
 
     componentDidUpdate: function() {
         this.calculateUrlPreview();
+    },
+
+    componentWillUnmount: function() {
+        this._unmounted = true;
     },
 
     shouldComponentUpdate: function(nextProps, nextState) {
@@ -139,18 +156,24 @@ module.exports = React.createClass({
         // TODO: make this configurable?
         if (node.textContent.indexOf("/") > -1)
         {
-            return node;
+            return true;
         }
         else {
             var url = node.getAttribute("href");
             var host = url.match(/^https?:\/\/(.*?)(\/|$)/)[1];
+
+            // never preview matrix.to links (if anything we should give a smart
+            // preview of the room/user they point to: nobody needs to be reminded
+            // what the matrix.to site looks like).
+            if (host == 'matrix.to') return false;
+
             if (node.textContent.toLowerCase().trim().startsWith(host.toLowerCase())) {
                 // it's a "foo.pl" style link
-                return;
+                return false;
             }
             else {
                 // it's a [foo bar](http://foo.com) style link
-                return node;
+                return true;
             }
         }
     },
@@ -188,16 +211,6 @@ module.exports = React.createClass({
         // We can get around this by fetching one now and showing a "confirmation dialog" (hurr hurr)
         // which requires the user to click through and THEN we can open the link in a new tab because
         // the window.open command occurs in the same stack frame as the onClick callback.
-
-        let integrationsEnabled = UserSettingsStore.isFeatureEnabled("integration_management");
-        if (!integrationsEnabled) {
-            var ErrorDialog = sdk.getComponent("dialogs.ErrorDialog");
-            Modal.createDialog(ErrorDialog, {
-                title: "Integrations disabled",
-                description: "You need to enable the Labs option 'Integrations Management' in your Vector user settings first.",
-            });
-            return;
-        }
 
         // Go fetch a scalar token
         let scalarClient = new ScalarAuthClient();
@@ -280,4 +293,3 @@ module.exports = React.createClass({
         }
     },
 });
-

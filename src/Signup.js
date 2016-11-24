@@ -51,6 +51,12 @@ class Signup {
 
 /**
  * Registration logic class
+ * This exists for the lifetime of a user's attempt to register an account,
+ * so if their registration attempt fails for whatever reason and they
+ * try again, call register() on the same instance again.
+ *
+ * TODO: parts of this overlap heavily with InteractiveAuth in the js-sdk. It
+ * would be nice to make use of that rather than rolling our own version of it.
  */
 class Register extends Signup {
     constructor(hsUrl, isUrl, opts) {
@@ -117,12 +123,28 @@ class Register extends Signup {
         });
     }
 
+    /**
+     * Starts the registration process from the first stage
+     */
     register(formVals) {
         var {username, password, email} = formVals;
         this.email = email;
         this.username = username;
         this.password = password;
         const client = this._createTemporaryClient();
+        this.activeStage = null;
+
+        // If there hasn't been a client secret set by this point,
+        // generate one for this session. It will only be used if
+        // we do email verification, but far simpler to just make
+        // sure we have one.
+        // We re-use this same secret over multiple calls to register
+        // so that the identity server can honour the sendAttempt
+        // parameter and not re-send email unless we actually want
+        // another mail to be sent.
+        if (!this.params.clientSecret) {
+            this.params.clientSecret = client.generateClientSecret();
+        }
         return this._tryRegister(client);
     }
 
@@ -160,7 +182,7 @@ class Register extends Signup {
                     if (flow) {
                         console.log("Active flow => %s", JSON.stringify(flow));
                         var flowStage = self.firstUncompletedStage(flow);
-                        if (flowStage != self.activeStage) {
+                        if (!self.activeStage || flowStage != self.activeStage.type) {
                             return self._startStage(client, flowStage).catch(function(err) {
                                 self.setStep('START');
                                 throw err;

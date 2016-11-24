@@ -21,6 +21,7 @@ var sdk = require('../../../index');
 var MatrixClientPeg = require('../../../MatrixClientPeg');
 var Modal = require("../../../Modal");
 var dis = require("../../../dispatcher");
+var rate_limited_func = require('../../../ratelimitedfunc');
 
 var linkify = require('linkifyjs');
 var linkifyElement = require('linkifyjs/element');
@@ -85,8 +86,12 @@ module.exports = React.createClass({
         }
 
         // redisplay the room name, topic, etc.
-        this.forceUpdate();
+        this._rateLimitedUpdate();
     },
+
+    _rateLimitedUpdate: new rate_limited_func(function() {
+        this.forceUpdate();
+    }, 500),
 
     _onRoomNameChange: function(room) {
         this.forceUpdate();
@@ -294,7 +299,7 @@ module.exports = React.createClass({
         var rightPanel_buttons;
         if (this.props.collapsedRhs) {
             rightPanel_buttons =
-                <div className="mx_RoomHeader_button" onClick={this.onShowRhsClick} title=">">
+                <div className="mx_RoomHeader_button" onClick={this.onShowRhsClick} title="<">
                     <TintableSvg src="img/minimise.svg" width="10" height="16"/>
                 </div>
         }

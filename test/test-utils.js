@@ -24,38 +24,16 @@ export function beforeEach(context) {
  * Stub out the MatrixClient, and configure the MatrixClientPeg object to
  * return it when get() is called.
  *
+ * TODO: once the components are updated to get their MatrixClients from
+ * the react context, we can get rid of this and just inject a test client
+ * via the context instead.
+ *
  * @returns {sinon.Sandbox}; remember to call sandbox.restore afterwards.
  */
 export function stubClient() {
     var sandbox = sinon.sandbox.create();
 
-    var client = {
-        getHomeserverUrl: sinon.stub(),
-        getIdentityServerUrl: sinon.stub(),
-
-        getPushActionsForEvent: sinon.stub(),
-        getRoom: sinon.stub().returns(this.mkStubRoom()),
-        getRooms: sinon.stub().returns([]),
-        loginFlows: sinon.stub(),
-        on: sinon.stub(),
-        removeListener: sinon.stub(),
-        isRoomEncrypted: sinon.stub().returns(false),
-
-        paginateEventTimeline: sinon.stub().returns(q()),
-        sendReadReceipt: sinon.stub().returns(q()),
-        getRoomIdForAlias: sinon.stub().returns(q()),
-        getProfileInfo: sinon.stub().returns(q({})),
-        getAccountData: (type) => {
-            return mkEvent({
-                type,
-                event: true,
-                content: {},
-            });
-        },
-        setAccountData: sinon.stub(),
-        sendTyping: sinon.stub().returns(q({})),
-        sendHtmlMessage: () => q({}),
-    };
+    var client = createTestClient();
 
     // stub out the methods in MatrixClientPeg
     //
@@ -71,6 +49,43 @@ export function stubClient() {
     return sandbox;
 }
 
+/**
+ * Create a stubbed-out MatrixClient
+ *
+ * @returns {object} MatrixClient stub
+ */
+export function createTestClient() {
+    return {
+        getHomeserverUrl: sinon.stub(),
+        getIdentityServerUrl: sinon.stub(),
+
+        getPushActionsForEvent: sinon.stub(),
+        getRoom: sinon.stub().returns(mkStubRoom()),
+        getRooms: sinon.stub().returns([]),
+        loginFlows: sinon.stub(),
+        on: sinon.stub(),
+        removeListener: sinon.stub(),
+        isRoomEncrypted: sinon.stub().returns(false),
+        peekInRoom: sinon.stub().returns(q(mkStubRoom())),
+
+        paginateEventTimeline: sinon.stub().returns(q()),
+        sendReadReceipt: sinon.stub().returns(q()),
+        getRoomIdForAlias: sinon.stub().returns(q()),
+        getProfileInfo: sinon.stub().returns(q({})),
+        getAccountData: (type) => {
+            return mkEvent({
+                type,
+                event: true,
+                content: {},
+            });
+        },
+        setAccountData: sinon.stub(),
+        sendTyping: sinon.stub().returns(q({})),
+        sendTextMessage: () => q({}),
+        sendHtmlMessage: () => q({}),
+        getSyncState: () => "SYNCING",
+    };
+}
 
 /**
  * Create an Event.
@@ -184,11 +199,17 @@ export function mkMessage(opts) {
 }
 
 export function mkStubRoom(roomId = null) {
+    var stubTimeline = { getEvents: () => [] };
     return {
         roomId,
         getReceiptsForEvent: sinon.stub().returns([]),
         getMember: sinon.stub().returns({}),
         getJoinedMembers: sinon.stub().returns([]),
+        getPendingEvents: () => [],
+        getLiveTimeline: () => stubTimeline,
+        getUnfilteredTimelineSet: () => null,
+        getAccountData: () => null,
+        hasMembershipState: () => null,
         currentState: {
             getStateEvents: sinon.stub(),
             members: [],

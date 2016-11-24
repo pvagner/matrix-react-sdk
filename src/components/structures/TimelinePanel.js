@@ -108,7 +108,9 @@ var TimelinePanel = React.createClass({
 
     getDefaultProps: function() {
         return {
-            timelineCap: 250,
+            // By default, disable the timelineCap in favour of unpaginating based on
+            // event tile heights. (See _unpaginateEvents)
+            timelineCap: Number.MAX_VALUE,
             className: 'mx_RoomView_messagePanel',
         };
     },
@@ -242,6 +244,34 @@ var TimelinePanel = React.createClass({
             client.removeListener("Room.redaction", this.onRoomRedaction);
             client.removeListener("Room.receipt", this.onRoomReceipt);
             client.removeListener("Room.localEchoUpdated", this.onLocalEchoUpdated);
+        }
+    },
+
+    onMessageListUnfillRequest: function(backwards, scrollToken) {
+        let dir = backwards ? EventTimeline.BACKWARDS : EventTimeline.FORWARDS;
+        debuglog("TimelinePanel: unpaginating events in direction", dir);
+
+        // All tiles are inserted by MessagePanel to have a scrollToken === eventId
+        let eventId = scrollToken;
+
+        let marker = this.state.events.findIndex(
+            (ev) => {
+                return ev.getId() === eventId;
+            }
+        );
+
+        let count = backwards ? marker + 1 : this.state.events.length - marker;
+
+        if (count > 0) {
+            debuglog("TimelinePanel: Unpaginating", count, "in direction", dir);
+            this._timelineWindow.unpaginate(count, backwards);
+
+            // We can now paginate in the unpaginated direction
+            const canPaginateKey = (backwards) ? 'canBackPaginate' : 'canForwardPaginate';
+            this.setState({
+                [canPaginateKey]: true,
+                events: this._getEvents(),
+            });
         }
     },
 
@@ -431,6 +461,10 @@ var TimelinePanel = React.createClass({
     sendReadReceipt: function() {
         if (!this.refs.messagePanel) return;
         if (!this.props.manageReadReceipts) return;
+        // This happens on user_activity_end which is delayed, and it's
+        // very possible have logged out within that timeframe, so check
+        // we still have a client.
+        if (!MatrixClientPeg.get()) return;
 
         // if we are scrolled to the bottom, do a quick-reset of our unreadNotificationCount
         // to avoid having to wait from the remote echo from the homeserver.
@@ -776,7 +810,7 @@ var TimelinePanel = React.createClass({
                     });
                 };
             }
-            var message = "Vector was trying to load a specific point in this room's timeline but ";
+            var message = "Riot was trying to load a specific point in this room's timeline but ";
             if (error.errcode == 'M_FORBIDDEN') {
                 message += "you do not have permission to view the message in question.";
             } else {
@@ -980,6 +1014,7 @@ var TimelinePanel = React.createClass({
                     stickyBottom={ stickyBottom }
                     onScroll={ this.onMessageListScroll }
                     onFillRequest={ this.onMessageListFillRequest }
+                    onUnfillRequest={ this.onMessageListUnfillRequest }
                     opacity={ this.props.opacity }
                     className={ this.props.className }
                     tileShape={ this.props.tileShape }

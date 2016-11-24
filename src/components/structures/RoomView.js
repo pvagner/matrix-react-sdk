@@ -38,6 +38,8 @@ var rate_limited_func = require('../../ratelimitedfunc');
 var ObjectUtils = require('../../ObjectUtils');
 var Rooms = require('../../Rooms');
 
+import KeyCode from '../../KeyCode';
+
 import UserProvider from '../../autocomplete/UserProvider';
 
 var DEBUG = false;
@@ -98,6 +100,21 @@ module.exports = React.createClass({
 
         // is the RightPanel collapsed?
         collapsedRhs: React.PropTypes.bool,
+
+        // a map from room id to scroll state, which will be updated on unmount.
+        //
+        // If there is no special scroll state (ie, we are following the live
+        // timeline), the scroll state is null. Otherwise, it is an object with
+        // the following properties:
+        //
+        //    focussedEvent: the ID of the 'focussed' event. Typically this is
+        //        the last event fully visible in the viewport, though if we
+        //        have done an explicit scroll to an explicit event, it will be
+        //        that event.
+        //
+        //    pixelOffset: the number of pixels the window is scrolled down
+        //        from the focussedEvent.
+        scrollStateMap: React.PropTypes.object,
     },
 
     getInitialState: function() {
@@ -239,9 +256,63 @@ module.exports = React.createClass({
         }
     },
 
+    componentDidMount: function() {
+        var call = this._getCallForRoom();
+        var callState = call ? call.call_state : "ended";
+        this.setState({
+            callState: callState
+        });
+
+        this._updateConfCallNotification();
+
+        window.addEventListener('resize', this.onResize);
+        this.onResize();
+
+        document.addEventListener("keydown", this.onKeyDown);
+
+        // XXX: EVIL HACK to autofocus inviting on empty rooms.
+        // We use the setTimeout to avoid racing with focus_composer.
+        if (this.state.room &&
+            this.state.room.getJoinedMembers().length == 1 &&
+            this.state.room.getLiveTimeline() &&
+            this.state.room.getLiveTimeline().getEvents() &&
+            this.state.room.getLiveTimeline().getEvents().length <= 6)
+        {
+            var inviteBox = document.getElementById("mx_SearchableEntityList_query");
+            setTimeout(function() {
+                if (inviteBox) {
+                    inviteBox.focus();
+                }
+            }, 50);
+        }
+    },
+
+    componentWillReceiveProps: function(newProps) {
+        if (newProps.roomAddress != this.props.roomAddress) {
+            throw new Error("changing room on a RoomView is not supported");
+        }
+
+        if (newProps.eventId != this.props.eventId) {
+            // when we change focussed event id, hide the search results.
+            this.setState({searchResults: null});
+        }
+    },
+
     shouldComponentUpdate: function(nextProps, nextState) {
         return (!ObjectUtils.shallowEqual(this.props, nextProps) ||
                 !ObjectUtils.shallowEqual(this.state, nextState));
+    },
+
+    componentDidUpdate: function() {
+        if (this.refs.roomView) {
+            var roomView = ReactDOM.findDOMNode(this.refs.roomView);
+            if (!roomView.ondrop) {
+                roomView.addEventListener('drop', this.onDrop);
+                roomView.addEventListener('dragover', this.onDragOver);
+                roomView.addEventListener('dragleave', this.onDragLeaveOrEnd);
+                roomView.addEventListener('dragend', this.onDragLeaveOrEnd);
+            }
+        }
     },
 
     componentWillUnmount: function() {
@@ -250,6 +321,9 @@ module.exports = React.createClass({
         //
         // (We could use isMounted, but facebook have deprecated that.)
         this.unmounted = true;
+
+        // update the scroll map before we get unmounted
+        this._updateScrollMap();
 
         if (this.refs.roomView) {
             // disconnect the D&D event listeners from the room view. This
@@ -273,12 +347,46 @@ module.exports = React.createClass({
 
         window.removeEventListener('resize', this.onResize);
 
+        document.removeEventListener("keydown", this.onKeyDown);
+
         // cancel any pending calls to the rate_limited_funcs
         this._updateRoomMembers.cancelPendingCall();
 
         // no need to do this as Dir & Settings are now overlays. It just burnt CPU.
         // console.log("Tinter.tint from RoomView.unmount");
         // Tinter.tint(); // reset colourscheme
+    },
+
+    onKeyDown: function(ev) {
+        let handled = false;
+        const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+        let ctrlCmdOnly;
+        if (isMac) {
+            ctrlCmdOnly = ev.metaKey && !ev.altKey && !ev.ctrlKey && !ev.shiftKey;
+        } else {
+            ctrlCmdOnly = ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.shiftKey;
+        }
+
+        switch (ev.keyCode) {
+            case KeyCode.KEY_D:
+                if (ctrlCmdOnly) {
+                    this.onMuteAudioClick();
+                    handled = true;
+                }
+                break;
+
+            case KeyCode.KEY_E:
+                if (ctrlCmdOnly) {
+                    this.onMuteVideoClick();
+                    handled = true;
+                }
+                break;
+        }
+
+        if (handled) {
+            ev.stopPropagation();
+            ev.preventDefault();
+        }
     },
 
     onAction: function(payload) {
@@ -323,17 +431,6 @@ module.exports = React.createClass({
                 });
 
                 break;
-        }
-    },
-
-    componentWillReceiveProps: function(newProps) {
-        if (newProps.roomAddress != this.props.roomAddress) {
-            throw new Error("changing room on a RoomView is not supported");
-        }
-
-        if (newProps.eventId != this.props.eventId) {
-            // when we change focussed event id, hide the search results.
-            this.setState({searchResults: null});
         }
     },
 
@@ -501,18 +598,17 @@ module.exports = React.createClass({
             return;
         }
 
-        if (this.props.ConferenceHandler &&
-            member.userId === this.props.ConferenceHandler.getConferenceUserIdForRoom(member.roomId)) {
-            this._updateConfCallNotification();
-        }
-
         this._updateRoomMembers();
     },
 
     // rate limited because a power level change will emit an event for every
     // member in the room.
     _updateRoomMembers: new rate_limited_func(function() {
-        // a member state changed in this room, refresh the tab complete list
+        // a member state changed in this room
+        // refresh the conf call notification state
+        this._updateConfCallNotification();
+
+        // refresh the tab complete list
         this.tabComplete.loadEntries(this.state.room);
         this._updateAutoComplete();
 
@@ -571,47 +667,6 @@ module.exports = React.createClass({
                 confMember.membership === "join"
             )
         });
-    },
-
-    componentDidMount: function() {
-        var call = this._getCallForRoom();
-        var callState = call ? call.call_state : "ended";
-        this.setState({
-            callState: callState
-        });
-
-        this._updateConfCallNotification();
-
-        window.addEventListener('resize', this.onResize);
-        this.onResize();
-
-        // XXX: EVIL HACK to autofocus inviting on empty rooms.
-        // We use the setTimeout to avoid racing with focus_composer.
-        if (this.state.room &&
-            this.state.room.getJoinedMembers().length == 1 &&
-            this.state.room.getLiveTimeline() &&
-            this.state.room.getLiveTimeline().getEvents() &&
-            this.state.room.getLiveTimeline().getEvents().length <= 6)
-        {
-            var inviteBox = document.getElementById("mx_SearchableEntityList_query");
-            setTimeout(function() {
-                if (inviteBox) {
-                    inviteBox.focus();
-                }
-            }, 50);
-        }
-    },
-
-    componentDidUpdate: function() {
-        if (this.refs.roomView) {
-            var roomView = ReactDOM.findDOMNode(this.refs.roomView);
-            if (!roomView.ondrop) {
-                roomView.addEventListener('drop', this.onDrop);
-                roomView.addEventListener('dragover', this.onDragOver);
-                roomView.addEventListener('dragleave', this.onDragLeaveOrEnd);
-                roomView.addEventListener('dragend', this.onDragLeaveOrEnd);
-            }
-        }
     },
 
     onSearchResultsResize: function() {
@@ -1173,22 +1228,25 @@ module.exports = React.createClass({
         }
     },
 
+    // update scrollStateMap on unmount
+    _updateScrollMap: function() {
+        if (!this.state.room) {
+            // we were instantiated on a room alias and haven't yet joined the room.
+            return;
+        }
+        if (!this.props.scrollStateMap) return;
+
+        var roomId = this.state.room.roomId;
+
+        var state = this._getScrollState();
+        this.props.scrollStateMap[roomId] = state;
+    },
+
+
     // get the current scroll position of the room, so that it can be
     // restored when we switch back to it.
     //
-    // If there is no special scroll state (ie, we are following the live
-    // timeline), returns null. Otherwise, returns an object with the following
-    // properties:
-    //
-    //    focussedEvent: the ID of the 'focussed' event. Typically this is the
-    //        last event fully visible in the viewport, though if we have done
-    //        an explicit scroll to an explicit event, it will be that event.
-    //
-    //    pixelOffset: the number of pixels the window is scrolled down from
-    //        the focussedEvent.
-    //
-    //
-    getScrollState: function() {
+    _getScrollState: function() {
         var messagePanel = this.refs.messagePanel;
         if (!messagePanel) return null;
 
@@ -1261,9 +1319,7 @@ module.exports = React.createClass({
         }
         var newState = !call.isMicrophoneMuted();
         call.setMicrophoneMuted(newState);
-        this.setState({
-            audioMuted: newState
-        });
+        this.forceUpdate(); // TODO: just update the voip buttons
     },
 
     onMuteVideoClick: function() {
@@ -1273,9 +1329,7 @@ module.exports = React.createClass({
         }
         var newState = !call.isLocalVideoMuted();
         call.setLocalVideoMuted(newState);
-        this.setState({
-            videoMuted: newState
-        });
+        this.forceUpdate(); // TODO: just update the voip buttons
     },
 
     onChildResize: function() {
@@ -1305,19 +1359,6 @@ module.exports = React.createClass({
         if(panel) {
             panel.handleScrollKey(ev);
         }
-    },
-
-    /**
-     * Get the ID of the displayed room
-     *
-     * Returns null if the RoomView was instantiated on a room alias and
-     * we haven't yet joined the room.
-     */
-    getRoomId: function() {
-        if (!this.state.room) {
-            return null;
-        }
-        return this.state.room.roomId;
     },
 
     /**
