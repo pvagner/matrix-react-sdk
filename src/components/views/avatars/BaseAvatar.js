@@ -151,7 +151,7 @@ module.exports = React.createClass({
                                     width: width + "px",
                                     lineHeight: height + "px" }}>{initialLetter}</EmojiText>
                     <img className="mx_BaseAvatar_image" src={imageUrl}
-                        alt="" title={title} onError={this.onError}
+                        alt={name} title={title} onError={this.onError}
                         width={width} height={height} />
                 </span>
             );
@@ -160,7 +160,7 @@ module.exports = React.createClass({
             <img className="mx_BaseAvatar mx_BaseAvatar_image" src={imageUrl}
                 onError={this.onError}
                 width={width} height={height}
-                title={title} alt=""
+                title={title} alt={name}
                 {...otherProps} />
         );
     }
